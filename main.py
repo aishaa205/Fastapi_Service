@@ -2,7 +2,7 @@ import sys
 sys.path.append("..") 
 
 from fastapi import FastAPI , HTTPException ,Query
-from database import jobs_collection 
+# from database import jobs_collection 
 import joblib
 from sentence_transformers import SentenceTransformer
 import torch
@@ -21,8 +21,8 @@ def get_embedding(text):
     with torch.no_grad():  # Disable gradient tracking for efficiency
         return model.encode(text, convert_to_tensor=True).tolist()
 
-@app.get("/recom/")
-async def recommend_jobs(job_title: str = Query(...), user_skills: str = Query(...)):#user_skills: str, limit: int = 10):
+# @app.get("/recom/")
+# async def recommend_jobs(job_title: str = Query(...), user_skills: str = Query(...)):#user_skills: str, limit: int = 10):
     """AI-powered job recommendations using MongoDB Atlas vector search."""
 
     query_vector = get_embedding(user_skills)
@@ -55,7 +55,17 @@ async def recommend_jobs(job_title: str = Query(...), user_skills: str = Query(.
         raise HTTPException(status_code=404, detail="No matching jobs found")
 
     return {"recommendations": results}
+@app.get("/ats/")
+async def ats(input1: str = Query(...), input2: str = Query(...)):
+    """AI-powered job description similarity using MongoDB Atlas vector search."""
 
+    query_vector1 = get_embedding(input1)
+    query_vector2 = get_embedding(input2)
+
+    # Calculate cosine similarity between two vectors
+    similarity = torch.nn.CosineSimilarity()(torch.tensor(query_vector1), torch.tensor(query_vector2)).item()
+
+    return {"similarity": similarity}
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8001)
