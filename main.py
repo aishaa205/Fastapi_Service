@@ -14,10 +14,11 @@ app= FastAPI()
 
 # Load Sentence Transformer Model with GPU Support (if available)
 device = "cuda" if torch.cuda.is_available() else "cpu"
-model = SentenceTransformer("paraphrase-MiniLM-L6-v2", device=device)
+model = SentenceTransformer(r"C:\Users\Sameh\Desktop\Omar Dev\Fastapi_Service\model\paraphrase-MiniLM-L6-v2", device=device)
 
 # Function to encode text efficiently
 def get_embedding(text):
+    print('text')
     with torch.no_grad():  # Disable gradient tracking for efficiency
         return model.encode(text, convert_to_tensor=True).tolist()
 
@@ -55,9 +56,10 @@ def get_embedding(text):
         raise HTTPException(status_code=404, detail="No matching jobs found")
 
     return {"recommendations": results}
-@app.get("/ats/")
+@app.get("/ats")
 async def ats(input1: str = Query(...), input2: str = Query(...)):
-    """AI-powered job description similarity using MongoDB Atlas vector search."""
+    print(
+    """AI-powered job description similarity using MongoDB Atlas vector search.""")
 
     query_vector1 = get_embedding(input1)
     query_vector2 = get_embedding(input2)
