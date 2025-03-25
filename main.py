@@ -2,19 +2,51 @@ import sys
 sys.path.append("..") 
 
 
-from sentence_transformers import SentenceTransformer
-from fastapi import FastAPI , HTTPException ,Query, BackgroundTasks
+from sentence_transformers import SentenceTransformer , util
+from fastapi import FastAPI , HTTPException ,Query, UploadFile, File, Form , Header, Depends
 from database import jobs_collection 
 from pydantic import BaseModel,validator
 from bson import ObjectId
 import torch
 import joblib
-import os
+import os 
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics.pairwise import cosine_similarity
+import shutil
+import re
+import fitz  # PyMuPDF
+import spacy
+import requests
+from io import BytesIO
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseDownload
+from google.oauth2 import service_account
+from loguru import logger
+from functools import lru_cache
+import requests  # To download Cloudinary files
+from pdf2image import convert_from_bytes  # Convert scanned PDF to images
+import pytesseract  # OCR for text extraction
+
+
+
+# Security: API Key Middleware
+def verify_api_key(api_key: str = Header(...)):
+    if api_key != "your_secure_api_key":
+        raise HTTPException(status_code=403, detail="Invalid API Key")
+    return api_key
+
+
+
+
 
 
 app = FastAPI()
+#load  ats model
+nlp = spacy.load("en_core_web_sm")
+model = SentenceTransformer("all-MiniLM-L6-v2")
 
 
+#load recommender model
 def load_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     return SentenceTransformer("paraphrase-MiniLM-L6-v2", device=device)
@@ -24,6 +56,7 @@ async def startup_event():
     #Preload model before serving requests
     global model
     model = load_model()
+    logger.info("ML Model Loaded Successfully!")
 
 def get_embedding(text):
     with torch.no_grad():
@@ -34,11 +67,6 @@ async def recommend_jobs_background(user_skills: str):
     query_vector = get_embedding(user_skills)
     return {"embedding": query_vector}  
 
-# @app.get("/recom/")
-# async def recommend_jobs(user_skills: str, background_tasks: BackgroundTasks):
-    # job recommendation m4 hytzhar
-    # background_tasks.add_task(recommend_jobs_background, user_skills)
-    # return {"message": "Processing recommendation in the background"}
 
 
 @app.get("/recom/")
@@ -148,3 +176,368 @@ async def delete_job(job_id: str):
         raise HTTPException(status_code=404, detail="Job not found")
     return {"message": "Job deleted successfully"}
 
+
+
+
+
+
+# Caching job embeddings
+@lru_cache(maxsize=1000)
+def get_job_embedding(job_text: str):
+    return model.encode(job_text, convert_to_tensor=True).tolist()
+
+def extract_text_from_pdf(file):
+    """Extract text from an uploaded PDF file (in-memory processing)"""
+    doc = fitz.open(stream=file.read(), filetype="pdf")
+    text = " ".join(page.get_text("text") for page in doc)
+    
+    return text
+# def extract_text_with_ocr(file):
+#     """Extract text from scanned PDF using OCR (Tesseract + pdf2image)"""
+#     images = convert_from_bytes(file.read())  # Convert PDF pages to images
+#     text = " ".join(pytesseract.image_to_string(img) for img in images)
+#     return text
+
+def preprocess_text(text):
+    text = re.sub(r'\W+', ' ', text)  # Remove special characters
+    text = re.sub(r'\s+', ' ', text).strip()  # Remove extra spaces
+    doc = nlp(text.lower())
+    return " ".join([token.lemma_ for token in doc if not token.is_stop and not token.is_punct])
+
+
+
+def extract_file_id_from_url(drive_url):
+    """ Extracts Google Drive file ID from the provided URL """
+    match = re.search(r"[-\w]{25,}", drive_url)
+    if not match:
+        raise HTTPException(status_code=400, detail="Invalid Google Drive link")
+    return match.group(0)
+
+def download_cv_from_drive_public(drive_url):
+    """ Downloads a PDF from a public Google Drive link """
+    file_id = extract_file_id_from_url(drive_url)
+    download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
+    
+    try:
+        response = requests.get(download_url)
+        if response.status_code != 200:
+            raise HTTPException(status_code=400, detail="Failed to download CV. Ensure the link is public.")
+
+        file_stream = BytesIO(response.content)
+        return extract_text_from_pdf(file_stream)
+    except Exception as e:
+        logger.error(f"Error downloading CV: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to process CV from Google Drive")
+
+
+def calculate_similarity(cv_text, job_text):
+   # similarity between CV and job description
+    vectorizer = TfidfVectorizer(
+        stop_words='english',
+        ngram_range=(1,2),
+        max_features=50000,
+        use_idf=True
+    )
+    vectors = vectorizer.fit_transform([cv_text, job_text])
+    return cosine_similarity(vectors[0], vectors[1])[0][0] * 100  # Return percentage match
+  
+
+
+@app.post("/ats/")
+async def ats_system(
+    job_id: str = Form(...),
+    cv_drive_link: str = Form(...)
+):
+# async def ats_system(job_id: str = Form(...), cv_cloudinary_url: str = Form(...)):
+    """ Matches a CV against a job description using TF-IDF """
+    job = jobs_collection.find_one({"_id": ObjectId(job_id)})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    job_description = job.get("description", "")
+    cv_text = download_cv_from_drive_public(cv_drive_link)
+    
+
+    
+    #Preprocess texts
+    cv_processed = preprocess_text(cv_text)
+    job_processed = preprocess_text(job_description)
+
+    # Calculate similarity
+    similarity_score = calculate_similarity(cv_processed, job_processed)
+
+    logger.info(f"ATS Match Score for Job {job_id}: {similarity_score:.3f}%")
+    return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
+
+@app.get("/ats/")
+async def get_ats_info():
+    """ Health check endpoint """
+    return {"message": "ATS API is running! Use POST /ats/ to check CV-job match."}
+
+def download_cv_from_drive(file_id):
+    SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+    SERVICE_ACCOUNT_FILE = "path/to/service_account.json"
+    
+    creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+    service = build("drive", "v3", credentials=creds)
+    request = service.files().get_media(fileId=file_id)
+    file_stream = BytesIO()
+    downloader = MediaIoBaseDownload(file_stream, request)
+    done = False
+    try:
+        while not done:
+            status, done = downloader.next_chunk()
+        file_stream.seek(0)
+        return extract_text_from_pdf(file_stream)
+    except Exception as e:
+        logger.error(f"Error downloading CV: {str(e)}")
+        raise HTTPException(status_code=500, detail="Failed to download CV from Google Drive")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# @app.post("/ats/")
+# async def ats_system(cv_file: UploadFile = File(...), job_description: str = Form(...)):
+#     """Process CV and job description and return match percentage"""
+#     cv_text = extract_text_from_pdf(cv_file)
+#     cv_processed = preprocess_text(cv_text)
+#     job_processed = preprocess_text(job_description)
+#     similarity_score = calculate_similarity(cv_processed, job_processed)
+
+#     return {
+#         "match_percentage": round(similarity_score, 2),
+#         "message": "Higher score means a better match!"
+#     }
+# # el part da mahtag yt3adel 
+# def download_cv_from_drive(file_id):
+#     SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
+#     SERVICE_ACCOUNT_FILE = "path/to/service_account.json"
+    
+#     creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+#     service = build("drive", "v3", credentials=creds)
+#     request = service.files().get_media(fileId=file_id)
+#     file_stream = BytesIO()
+#     downloader = MediaIoBaseDownload(file_stream, request)
+#     done = False
+#     while not done:
+#         status, done = downloader.next_chunk()
+    
+#     file_stream.seek(0)
+#     return extract_text_from_pdf(file_stream)
+
+
+
+# @app.post("/ats/")
+# async def ats_system(job_id: str = Form(...), cv_drive_link: str = Form(...)):
+#     job = jobs_collection.find_one({"_id": ObjectId(job_id)})
+#     if not job:
+#         raise HTTPException(status_code=404, detail="Job not found")
+    
+#     job_description = job.get("description", "")
+#     match = re.search(r"[-\w]{25,}", cv_drive_link)
+#     if not match:
+#         raise HTTPException(status_code=400, detail="Invalid Google Drive link")
+    
+#     cv_file_id = match.group(0)
+#     cv_text = download_cv_from_drive(cv_file_id)
+#     cv_processed = preprocess_text(cv_text)
+#     job_processed = preprocess_text(job_description)
+#     similarity_score = calculate_similarity(cv_processed, job_processed)
+
+#     return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
+
+# @app.get("/ats/")
+# async def get_ats_info():
+#     return {"message": "ATS API is running! Use POST /ats/ to check CV-job match."}
