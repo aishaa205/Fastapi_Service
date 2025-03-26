@@ -11,3 +11,4 @@ print(client.list_database_names())
 
 db = client[DB_NAME]
 jobs_collection = db["jobs"]
+users_collection=db["user_cv_db"]
