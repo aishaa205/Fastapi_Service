@@ -1,18 +1,13 @@
 import sys
 sys.path.append("..") 
-
-
 from sentence_transformers import SentenceTransformer , util
 from fastapi import FastAPI , HTTPException ,Query, UploadFile, File, Form , Header, Depends
-from database import jobs_collection 
+from database import jobs_collection ,users_collection
 from pydantic import BaseModel,validator
 from bson import ObjectId
 import torch
-import joblib
-import os 
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
-import shutil
 import re
 import fitz  # PyMuPDF
 import requests
@@ -21,22 +16,20 @@ from googleapiclient.discovery import build
 from loguru import logger
 from functools import lru_cache
 import requests  # To download Cloudinary files
-from pdf2image import convert_from_bytes  # Convert scanned PDF to images
-
-
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+
 security = HTTPBearer()
 
 
 
 DJANGO_AUTH_URL = "http://localhost:8000/api/token/verify/"
 
-async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
-    response = requests.post(DJANGO_AUTH_URL, json={"token": token})
-    if response.status_code != 200:
-        raise HTTPException(status_code=403, detail="Invalid authentication token")
-    return response.json()  # or return the user details
+# async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
+#     token = credentials.credentials
+#     response = requests.post(DJANGO_AUTH_URL, json={"token": token})
+#     if response.status_code != 200:
+#         raise HTTPException(status_code=403, detail="Invalid authentication token")
+#     return response.json()  # or return the user details
 
 
 app = FastAPI()
@@ -52,7 +45,6 @@ def load_model():
 
 @app.on_event("startup")
 async def startup_event():
-    #Preload model before serving requests
     global model
     model = load_model()
     logger.info("ML Model Loaded Successfully!")
@@ -81,7 +73,6 @@ def extract_text_from_pdf_cloud(public_id: str):
         response.raise_for_status()  # Ensure the request was successful
         print("PDF downloaded successfully.")
        
-         #Use BytesIO to open PDF from memory
         pdf_stream = BytesIO(response.content)
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
         
@@ -95,20 +86,43 @@ def extract_text_from_pdf_cloud(public_id: str):
         raise HTTPException(status_code=500, detail=f"PDF processing error: {e}")   
 
 
+
+
+def get_embedding(text):
+    with torch.no_grad():
+        return model.encode(text, convert_to_tensor=True).tolist()
+
+
 @app.get("/recom/")
-async def recommend_jobs(user_skills: str, page: int = 1, page_size: int = 5):
-    """AI-powered job recommendations with pagination"""
-    print("user_skills",user_skills)
+async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: int = 5):
+    print("user_id",user_id)
+    print("cv_url",cv_url)
     print("page",page)
     if page < 1:
         raise HTTPException(status_code=400, detail="Page number must be 1 or higher")
-    
-    
-    extracted_text = extract_text_from_pdf_cloud(user_skills)
-    
-    query_vector = get_embedding(extracted_text)
-    skip = (page - 1) * page_size
 
+    user_data = users_collection.find_one({"user_id": user_id})
+    if user_data:
+        stored_cv_url = user_data.get("cv_url")
+        if stored_cv_url == cv_url:
+            print("Using stored embedding (CV unchanged)")
+            query_vector = user_data["embedding"]
+        else:
+            print("CV updated, generating new embedding")
+            extracted_text = extract_text_from_pdf_cloud(cv_url)
+            query_vector = get_embedding(extracted_text)
+            users_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"embedding": query_vector, "cv_url": cv_url}}  
+            )
+    else:
+        print("New user, extracting CV text")
+        extracted_text = extract_text_from_pdf_cloud(cv_url)
+        query_vector = get_embedding(extracted_text)
+        users_collection.insert_one(
+            {"user_id": user_id, "embedding": query_vector, "cv_url": cv_url} 
+        )
+    skip = (page - 1) * page_size
     pipeline = [
         {
             "$vectorSearch": {
@@ -147,7 +161,7 @@ async def recommend_jobs(user_skills: str, page: int = 1, page_size: int = 5):
 
 
 class Job(BaseModel):
-    id: str
+    id: int
     title: str
     description: str
 
@@ -231,13 +245,6 @@ def get_embedding_ats(text):
     with torch.no_grad():
         return model_1.encode(text, convert_to_tensor=True).tolist()
 
-
-# def extract_text_from_pdf(file):
-#     """Extract text from an uploaded PDF file (in-memory processing)"""
-#     doc = fitz.open(stream=file.read(), filetype="pdf")
-#     text = " ".join(page.get_text("text") for page in doc)
-#     return text
-
 def preprocess_text(text):
     text = re.sub(r'\W+', ' ', text)  # Remove special characters
     text = re.sub(r'\s+', ' ', text).strip()  # Remove extra spaces
@@ -245,43 +252,83 @@ def preprocess_text(text):
 
 
 def calculate_embedding_similarity(cv_text, job_text):
-    """Calculate similarity using sentence embeddings"""
     cv_embedding = model_1.encode(cv_text, convert_to_tensor=True)
     job_embedding = model_1.encode(job_text, convert_to_tensor=True)
     similarity_score = util.pytorch_cos_sim(cv_embedding, job_embedding).item()
-    return similarity_score * 100  # Convert to percentage
+    return similarity_score * 100  
 
-
-
-
-@app.post("/ats/{job_id}/")
-async def ats_system(
-    job_id: str = Form(...),
-    cv_drive_link: str = Form(...)
-):
-    """Matches a CV against a job description using sentence embeddings"""
-    #de kda mn mongodb not django 
+@app.post("/ats/{user_id}/{job_id}/")
+async def ats_system(user_id: str, job_id: str, cv_url: str):
+    """Matches a CV against a job description using sentence embeddings."""
+    
+    # Check if job exists
     job = jobs_collection.find_one({"_id": ObjectId(job_id)})
     if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        logger.info(f"Job {job_id} not found. Creating new job entry.")
+        new_job = {"_id": ObjectId(job_id), "description": "", "title": "Unknown", "combined_embedding": None}
+        jobs_collection.insert_one(new_job)
+        job = new_job  # Use newly created job entry
     
     job_description = job.get("description", "")
-    cv_text = extract_text_from_pdf_cloud(cv_drive_link)
+
+    # Check if user exists in DB
+    user_data = users_collection.find_one({"user_id": user_id})
     
+    if user_data:
+        stored_cv_url = user_data.get("cv_url")
+        if stored_cv_url == cv_url:
+            print("Using stored embedding (CV unchanged)")
+            cv_embedding = user_data["embedding"]
+        else:
+            print("CV updated, generating new embedding")
+            extracted_text = extract_text_from_pdf_cloud(cv_url)
+            cv_embedding = get_embedding_ats(extracted_text)
+            users_collection.update_one(
+                {"user_id": user_id},
+                {"$set": {"embedding": cv_embedding, "cv_url": cv_url}}
+            )
+    else:
+        print("New user, extracting CV text")
+        extracted_text = extract_text_from_pdf_cloud(cv_url)
+        cv_embedding = get_embedding_ats(extracted_text)
+        users_collection.insert_one(
+            {"user_id": user_id, "embedding": cv_embedding, "cv_url": cv_url}
+        )
+
     # Preprocess texts
-    cv_processed = preprocess_text(cv_text)
     job_processed = preprocess_text(job_description)
 
     # Calculate similarity
-    similarity_score = calculate_embedding_similarity(cv_processed, job_processed)
+    similarity_score = calculate_embedding_similarity(cv_embedding, job_processed)
 
     logger.info(f"ATS Match Score for Job {job_id}: {similarity_score:.3f}%")
     return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
 
-@app.get("/ats/")
-async def get_ats_info():
-    """Health check endpoint"""
-    return {"message": "ATS API is running! Use POST /ats/ to check CV-job match."}
+
+# @app.post("/ats/{job_id}/")
+# async def ats_system(
+#     job_id: str ,
+#     cv_drive_link: str = Form(...)
+# ):
+#     """Matches a CV against a job description using sentence embeddings"""
+#     #de kda mn mongodb not django 
+#     job = jobs_collection.find_one({"_id": ObjectId(job_id)})
+#     if not job:
+#         raise HTTPException(status_code=404, detail="Job not found")
+    
+#     job_description = job.get("description", "")
+#     cv_text = extract_text_from_pdf_cloud(cv_drive_link)
+    
+#     # Preprocess texts
+#     cv_processed = preprocess_text(cv_text)
+#     job_processed = preprocess_text(job_description)
+
+#     # Calculate similarity
+#     similarity_score = calculate_embedding_similarity(cv_processed, job_processed)
+
+#     logger.info(f"ATS Match Score for Job {job_id}: {similarity_score:.3f}%")
+#     return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
+
 
 
 
@@ -305,142 +352,6 @@ async def get_ats_info():
 
 
 #matnse4 split to 2 different files + add test cases file for each 
-
-
-# def extract_text_from_pdf(file):
-#     """Extract text from an uploaded PDF file (in-memory processing)"""
-#     doc = fitz.open(stream=file.read(), filetype="pdf")
-#     text = " ".join(page.get_text("text") for page in doc)
-    
-#     return text
-# # def extract_text_with_ocr(file):
-# #     """Extract text from scanned PDF using OCR (Tesseract + pdf2image)"""
-# #     images = convert_from_bytes(file.read())  # Convert PDF pages to images
-# #     text = " ".join(pytesseract.image_to_string(img) for img in images)
-# #     return text
-
-# def preprocess_text(text):
-#     text = re.sub(r'\W+', ' ', text)  # Remove special characters
-#     text = re.sub(r'\s+', ' ', text).strip()  # Remove extra spaces
-#     doc = nlp(text.lower())
-#     return " ".join([token.lemma_ for token in doc if not token.is_stop and not token.is_punct])
-
-
-
-# def extract_file_id_from_url(drive_url):
-#     """ Extracts Google Drive file ID from the provided URL """
-#     match = re.search(r"[-\w]{25,}", drive_url)
-#     if not match:
-#         raise HTTPException(status_code=400, detail="Invalid Google Drive link")
-#     return match.group(0)
-
-# def download_cv_from_drive_public(drive_url):
-#     """ Downloads a PDF from a public Google Drive link """
-#     file_id = extract_file_id_from_url(drive_url)
-#     download_url = f"https://drive.google.com/uc?export=download&id={file_id}"
-    
-#     try:
-#         response = requests.get(download_url)
-#         if response.status_code != 200:
-#             raise HTTPException(status_code=400, detail="Failed to download CV. Ensure the link is public.")
-
-#         file_stream = BytesIO(response.content)
-#         return extract_text_from_pdf(file_stream)
-#     except Exception as e:
-#         logger.error(f"Error downloading CV: {str(e)}")
-#         raise HTTPException(status_code=500, detail="Failed to process CV from Google Drive")
-
-
-# def calculate_similarity(cv_text, job_text):
-#    # similarity between CV and job description
-#     vectorizer = TfidfVectorizer(
-#         stop_words='english',
-#         ngram_range=(1,2),
-#         max_features=50000,
-#         use_idf=True
-#     )
-#     vectors = vectorizer.fit_transform([cv_text, job_text])
-#     return cosine_similarity(vectors[0], vectors[1])[0][0] * 100  # Return percentage match
-  
-
-
-# @app.post("/ats/")
-# async def ats_system(
-#     job_id: str = Form(...),
-#     cv_drive_link: str = Form(...)
-# ):
-# # async def ats_system(job_id: str = Form(...), cv_cloudinary_url: str = Form(...)):
-#     """ Matches a CV against a job description using TF-IDF """
-#     job = jobs_collection.find_one({"_id": ObjectId(job_id)})
-#     if not job:
-#         raise HTTPException(status_code=404, detail="Job not found")
-    
-#     job_description = job.get("description", "")
-#     cv_text = download_cv_from_drive_public(cv_drive_link)
-    
-
-    
-#     #Preprocess texts
-#     cv_processed = preprocess_text(cv_text)
-#     job_processed = preprocess_text(job_description)
-
-#     # Calculate similarity
-#     similarity_score = calculate_similarity(cv_processed, job_processed)
-
-#     logger.info(f"ATS Match Score for Job {job_id}: {similarity_score:.3f}%")
-#     return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
-
-# @app.get("/ats/")
-# async def get_ats_info():
-#     """ Health check endpoint """
-#     return {"message": "ATS API is running! Use POST /ats/ to check CV-job match."}
-
-# def download_cv_from_drive(file_id):
-#     SCOPES = ["https://www.googleapis.com/auth/drive.readonly"]
-#     SERVICE_ACCOUNT_FILE = "path/to/service_account.json"
-    
-#     creds = service_account.Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
-#     service = build("drive", "v3", credentials=creds)
-#     request = service.files().get_media(fileId=file_id)
-#     file_stream = BytesIO()
-#     downloader = MediaIoBaseDownload(file_stream, request)
-#     done = False
-#     try:
-#         while not done:
-#             status, done = downloader.next_chunk()
-#         file_stream.seek(0)
-#         return extract_text_from_pdf(file_stream)
-#     except Exception as e:
-#         logger.error(f"Error downloading CV: {str(e)}")
-#         raise HTTPException(status_code=500, detail="Failed to download CV from Google Drive")
-
-
-
-# from fastapi import FastAPI, Header, HTTPException
-# from JobRecommender import router as job_recommender_router
-# from ats_system import router as ats_router
-# from loguru import logger
-
-# app = FastAPI()
-
-# # Security: API Key Middleware
-# def verify_api_key(api_key: str = Header(...)):
-#     if api_key != "your_secure_api_key":
-#         raise HTTPException(status_code=403, detail="Invalid API Key")
-#     return api_key
-
-# @app.on_event("startup")
-# async def startup_event():
-#     logger.info("Server started successfully!")
-
-# # Include routers
-# app.include_router(job_recommender_router, prefix="/jobs", tags=["Job Recommender"])
-# app.include_router(ats_router, prefix="/ats", tags=["ATS System"])
-
-# @app.get("/")
-# async def root():
-#     return {"message": "Job Recommender & ATS System API Running"}
-
 
 
 
