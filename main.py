@@ -6,22 +6,22 @@ from sentence_transformers import SentenceTransformer , util
 from fastapi import FastAPI , HTTPException ,Query, UploadFile, File, Form , Header, Depends
 from database import jobs_collection 
 from pydantic import BaseModel,validator
-from bson import ObjectId
+# from bson import ObjectId
 import torch
-import joblib
+# import joblib
 import os 
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+# from sklearn.feature_extraction.text import TfidfVectorizer
+# from sklearn.metrics.pairwise import cosine_similarity
 import shutil
 import re
 import fitz  # PyMuPDF
 import requests
 from io import BytesIO
-from googleapiclient.discovery import build
+# from googleapiclient.discovery import build
 from loguru import logger
 from functools import lru_cache
 import requests  # To download Cloudinary files
-from pdf2image import convert_from_bytes  # Convert scanned PDF to images
+# from pdf2image import convert_from_bytes  # Convert scanned PDF to images
 
 
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -48,6 +48,7 @@ model_1 = SentenceTransformer("all-MiniLM-L6-v2")
 #load recommender model
 def load_model():
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    logger.info(f"Using device: {device}")
     return SentenceTransformer("paraphrase-MiniLM-L6-v2", device=device)
 
 @app.on_event("startup")
@@ -147,7 +148,7 @@ async def recommend_jobs(user_skills: str, page: int = 1, page_size: int = 5):
 
 
 class Job(BaseModel):
-    id: str
+    id: int
     title: str
     description: str
 
@@ -254,34 +255,34 @@ def calculate_embedding_similarity(cv_text, job_text):
 
 
 
-@app.post("/ats/{job_id}/")
-async def ats_system(
-    job_id: str = Form(...),
-    cv_drive_link: str = Form(...)
-):
-    """Matches a CV against a job description using sentence embeddings"""
-    #de kda mn mongodb not django 
-    job = jobs_collection.find_one({"_id": ObjectId(job_id)})
-    if not job:
-        raise HTTPException(status_code=404, detail="Job not found")
+# @app.post("/ats/{job_id}/")
+# async def ats_system(
+#     job_id: str = Form(...),
+#     cv_drive_link: str = Form(...)
+# ):
+#     """Matches a CV against a job description using sentence embeddings"""
+#     #de kda mn mongodb not django 
+#     job = jobs_collection.find_one({"_id": ObjectId(job_id)})
+#     if not job:
+#         raise HTTPException(status_code=404, detail="Job not found")
     
-    job_description = job.get("description", "")
-    cv_text = extract_text_from_pdf_cloud(cv_drive_link)
+#     job_description = job.get("description", "")
+#     cv_text = extract_text_from_pdf_cloud(cv_drive_link)
     
-    # Preprocess texts
-    cv_processed = preprocess_text(cv_text)
-    job_processed = preprocess_text(job_description)
+#     # Preprocess texts
+#     cv_processed = preprocess_text(cv_text)
+#     job_processed = preprocess_text(job_description)
 
-    # Calculate similarity
-    similarity_score = calculate_embedding_similarity(cv_processed, job_processed)
+#     # Calculate similarity
+#     similarity_score = calculate_embedding_similarity(cv_processed, job_processed)
 
-    logger.info(f"ATS Match Score for Job {job_id}: {similarity_score:.3f}%")
-    return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
+#     logger.info(f"ATS Match Score for Job {job_id}: {similarity_score:.3f}%")
+#     return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
 
-@app.get("/ats/")
-async def get_ats_info():
-    """Health check endpoint"""
-    return {"message": "ATS API is running! Use POST /ats/ to check CV-job match."}
+# @app.get("/ats/")
+# async def get_ats_info():
+#     """Health check endpoint"""
+#     return {"message": "ATS API is running! Use POST /ats/ to check CV-job match."}
 
 
 
