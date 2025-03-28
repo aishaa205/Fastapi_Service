@@ -9,15 +9,14 @@ import torch
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 import re
-import fitz  # PyMuPDF
-import requests
+import fitz  # PyMuPDf
 from io import BytesIO
 from googleapiclient.discovery import build
 from loguru import logger
 from functools import lru_cache
 import requests  # To download Cloudinary files
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
+from bson.errors import InvalidId
 security = HTTPBearer()
 
 
@@ -240,6 +239,9 @@ async def delete_job(job_id: str):
     return {"message": "Job deleted successfully"}
 
 
+class ATSRequest(BaseModel):
+    cv_url: str
+    job_id: int
 
 def get_embedding_ats(text):
     with torch.no_grad():
@@ -257,100 +259,75 @@ def calculate_embedding_similarity(cv_text, job_text):
     similarity_score = util.pytorch_cos_sim(cv_embedding, job_embedding).item()
     return similarity_score * 100  
 
-@app.post("/ats/{user_id}/{job_id}/")
-async def ats_system(user_id: str, job_id: str, cv_url: str):
-    """Matches a CV against a job description using sentence embeddings."""
-    
-    # Check if job exists
-    job = jobs_collection.find_one({"_id": ObjectId(job_id)})
-    if not job:
-        logger.info(f"Job {job_id} not found. Creating new job entry.")
-        new_job = {"_id": ObjectId(job_id), "description": "", "title": "Unknown", "combined_embedding": None}
-        jobs_collection.insert_one(new_job)
-        job = new_job  # Use newly created job entry
-    
-    job_description = job.get("description", "")
 
-    # Check if user exists in DB
-    user_data = users_collection.find_one({"user_id": user_id})
+@app.post("/ats/{user_id}/{job_id}/")
+async def ats_system(user_id: str, job_id: int, request: ATSRequest):
     
-    if user_data:
-        stored_cv_url = user_data.get("cv_url")
-        if stored_cv_url == cv_url:
-            print("Using stored embedding (CV unchanged)")
-            cv_embedding = user_data["embedding"]
-        else:
-            print("CV updated, generating new embedding")
-            extracted_text = extract_text_from_pdf_cloud(cv_url)
-            cv_embedding = get_embedding_ats(extracted_text)
-            users_collection.update_one(
-                {"user_id": user_id},
-                {"$set": {"embedding": cv_embedding, "cv_url": cv_url}}
-            )
+    print(f"Received request for user_id={user_id}, job_id={job_id}")
+
+    try:
+        job_object_id = job_id
+    except Exception as e:
+        print(f"Invalid job_id: {job_id} - Error: {e}")
+        raise HTTPException(status_code=400, detail="Invalid job ID")
+
+
+    job = jobs_collection.find_one({"id": job_object_id})
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job_embedding = job.get("combined_embedding", None)
+
+    if not job_embedding:
+        raise HTTPException(status_code=500, detail="Job embedding missing")
+
+    # Get CV URL
+    cv_url = request.cv_url
+    print(f"cv_url={cv_url}")
+
+    
+    user_data = users_collection.find_one({"user_id": user_id})
+
+    if user_data and user_data.get("cv_url") == cv_url:
+        print("Using stored embedding (CV unchanged)")
+        cv_embedding = user_data["embedding"]
     else:
-        print("New user, extracting CV text")
-        extracted_text = extract_text_from_pdf_cloud(cv_url)
-        cv_embedding = get_embedding_ats(extracted_text)
-        users_collection.insert_one(
-            {"user_id": user_id, "embedding": cv_embedding, "cv_url": cv_url}
+        try:
+            extracted_text = extract_text_from_pdf_cloud(cv_url)
+            print(f"Extracted text length: {len(extracted_text)}")
+        except Exception as e:
+            print(f"Error extracting text: {e}")
+            raise HTTPException(status_code=500, detail="CV extraction failed")
+
+        try:
+            cv_embedding = get_embedding(extracted_text)
+            print(f"Generated embedding length: {len(cv_embedding)}")
+        except Exception as e:
+            print(f"Error generating embedding: {e}")
+            raise HTTPException(status_code=500, detail="Embedding generation failed")
+
+        users_collection.update_one(
+            {"user_id": user_id},
+            {"$set": {"embedding": cv_embedding, "cv_url": cv_url}},
+            upsert=True
         )
 
-    # Preprocess texts
-    job_processed = preprocess_text(job_description)
-
-    # Calculate similarity
-    similarity_score = calculate_embedding_similarity(cv_embedding, job_processed)
-
-    logger.info(f"ATS Match Score for Job {job_id}: {similarity_score:.3f}%")
-    return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
-
-
-# @app.post("/ats/{job_id}/")
-# async def ats_system(
-#     job_id: str ,
-#     cv_drive_link: str = Form(...)
-# ):
-#     """Matches a CV against a job description using sentence embeddings"""
-#     #de kda mn mongodb not django 
-#     job = jobs_collection.find_one({"_id": ObjectId(job_id)})
-#     if not job:
-#         raise HTTPException(status_code=404, detail="Job not found")
     
-#     job_description = job.get("description", "")
-#     cv_text = extract_text_from_pdf_cloud(cv_drive_link)
+    if not cv_embedding or not job_embedding:
+        raise HTTPException(status_code=500, detail="Embedding computation failed")
     
-#     # Preprocess texts
-#     cv_processed = preprocess_text(cv_text)
-#     job_processed = preprocess_text(job_description)
+    try:
+        similarity_score = util.pytorch_cos_sim(
+            torch.tensor(cv_embedding), torch.tensor(job_embedding)
+        ).item()
+    except Exception as e:
+        print(f"Error computing similarity: {e}")
+        raise HTTPException(status_code=500, detail="Similarity computation failed")
 
-#     # Calculate similarity
-#     similarity_score = calculate_embedding_similarity(cv_processed, job_processed)
-
-#     logger.info(f"ATS Match Score for Job {job_id}: {similarity_score:.3f}%")
-#     return {"match_percentage": round(similarity_score, 2), "message": "Higher score means a better match!"}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+    return {"match_percentage": round(similarity_score * 100, 2), "message": "Higher score means a better match!"}
+    
+    
+    
+    
 #matnse4 split to 2 different files + add test cases file for each 
 
 
