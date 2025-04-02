@@ -4,10 +4,10 @@ from sentence_transformers import SentenceTransformer , util
 from fastapi import FastAPI , HTTPException ,Query, UploadFile, File, Form , Header, Depends
 from database import jobs_collection ,users_collection
 from pydantic import BaseModel,validator
-from bson import ObjectId
+# from bson import ObjectId
 import torch
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.metrics.pairwise import cosine_similarity
+# from sklearn.feature_extraction.text import TfidfVectorizer
+# from sklearn.metrics.pairwise import cosine_similarity
 import re
 import fitz  # PyMuPDf
 from io import BytesIO
@@ -16,7 +16,7 @@ from loguru import logger
 from functools import lru_cache
 import requests  # To download Cloudinary files
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from bson.errors import InvalidId
+# from bson.errors import InvalidId
 security = HTTPBearer()
 
 
@@ -210,32 +210,33 @@ async def create_job(job: Job):
 #     return job
 
 @app.put("/jobs/{job_id}")
-async def update_job(job_id: str, job: Job):
+async def update_job(job_id: int, job: Job):
     updated_job = job.dict()
     updated_job["combined_embedding"] = get_embedding(updated_job["description"] + " " + " ".join(updated_job["title"]))
-    
+    print(job_id)
     existing_job = jobs_collection.find_one({"id": job_id})
     print(existing_job)
     if not existing_job:
-            raise HTTPException(status_code=404, detail="Job not found")
+            raise HTTPException(status_code=404, detail="Job not found in mongodb")
     result = jobs_collection.update_one({"id": job_id}, {"$set": updated_job})
     print (result)
     if result.matched_count == 0:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail="Job not found in mongodb")
 
     return {"message": "Job updated successfully"}
 
 @app.delete("/jobs/{job_id}")
-async def delete_job(job_id: str):
+async def delete_job(job_id: int):
+    print("job_id",job_id)
     existing_job = jobs_collection.find_one({"id": job_id})
     print("existing_job",existing_job)
     if not existing_job:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail="Job not found fastapi mongodb")
     result = jobs_collection.delete_one({"id": job_id})
     print(result)
     print(result)
     if result.deleted_count == 0:
-        raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=404, detail="Job not found in mongodb")
     return {"message": "Job deleted successfully"}
 
 
