@@ -16,19 +16,14 @@ from loguru import logger
 from functools import lru_cache
 import requests  # To download Cloudinary files
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from typing import Optional
 # from bson.errors import InvalidId
 security = HTTPBearer()
-
+from fastapi import Request
+import json
 
 
 DJANGO_AUTH_URL = "http://localhost:8000/api/token/verify/"
-
-# async def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-#     token = credentials.credentials
-#     response = requests.post(DJANGO_AUTH_URL, json={"token": token})
-#     if response.status_code != 200:
-#         raise HTTPException(status_code=403, detail="Invalid authentication token")
-#     return response.json()  # or return the user details
 
 
 app = FastAPI()
@@ -129,13 +124,14 @@ async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: in
                 "path": "combined_embedding",
                 "queryVector": query_vector,
                 "numCandidates": 500,
-                "limit": page_size,
+                "limit": 100,
                 "metric": "cosine"
             }
         },
         {
             "$project": {
                 "_id": 0,
+                "id": 1,
                 "title": 1,
                 "description": 1,
                 "score": {"$meta": "vectorSearchScore"}
@@ -157,12 +153,20 @@ async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: in
         "recommendations": results
     }
 
-
-
 class Job(BaseModel):
     id: int
     title: str
     description: str
+    location: str
+    experince: str
+    status: str
+    type_of_job: str
+    company: int
+    company_name: str
+    company_logo: Optional[str] = None
+    {'id': 31, 'title': 'Backend Engineer', 'description': 'Django and FastAPI experience required', 'location': 'Remote', 'status': 'open'
+     , 'type_of_job': 'Full-time', 'experince': 'Mid-level', 'company': 8, 'company_name': 'Aisha Amr', 'company_logo': None}
+    
 
     @validator("title", "description")
     def must_not_be_empty(cls, value):
@@ -181,14 +185,17 @@ class Job(BaseModel):
 
 # @app.post("/jobs", dependencies=[Depends(verify_token)])
 @app.post("/jobs")
-async def create_job(job: Job):
+async def create_job(job: Job, request: Request):
     print("job",job)
     job_data = job.dict()
     print("job_data",job_data)
     job_data["combined_embedding"] = get_embedding(job_data["description"] + " " + " ".join(job_data["title"]))
     inserted_job = jobs_collection.insert_one(job_data)
     print("inserted_job",inserted_job)
-    return {"id": str(inserted_job.inserted_id), "message": "Job created successfully"}
+    return {"id": str(inserted_job.inserted_id),
+            "message": "Job created successfully",
+            #"mongodb_id": str(inserted_job.inserted_id)
+            }
 
 
 # Commentb l7d m ashof ha7tagha wala la2
@@ -330,44 +337,3 @@ async def ats_system(user_id: str, job_id: int, request: ATSRequest):
     
     
 #matnse4 split to 2 different files + add test cases file for each 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
