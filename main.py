@@ -85,17 +85,32 @@ def extract_text_from_pdf_cloud(public_id: str):
 def get_embedding(text):
     with torch.no_grad():
         return model.encode(text, convert_to_tensor=True).tolist()
+    
+def format_cv_url(cv_url):
+    if cv_url.startswith("http"):
+        return cv_url.split("/")[-1]
+    return cv_url
 
 
 @app.get("/recom/")
 async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: int = 5):
     print("user_id",user_id)
+    cv_url = format_cv_url(cv_url)
     print("cv_url",cv_url)
     print("page",page)
     if page < 1:
         raise HTTPException(status_code=400, detail="Page number must be 1 or higher")
 
     user_data = users_collection.find_one({"user_id": user_id})
+    page_count= jobs_collection.count_documents({}) // page_size + 1
+    if page*page_size > 100:
+        raise HTTPException(status_code=400, detail="Max recommendations is 100")
+    if page > page_count/page_size:
+        raise HTTPException(status_code=400, detail="Page number exceeds available pages")
+    if not cv_url:
+        raise HTTPException(status_code=400, detail="CV URL is required")
+    if not user_id:
+        raise HTTPException(status_code=400, detail="User ID is required")
     if user_data:
         stored_cv_url = user_data.get("cv_url")
         if stored_cv_url == cv_url:
@@ -149,7 +164,7 @@ async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: in
     return {
         "page": page,
         "page_size": page_size,
-        "total_results": len(results),
+        "total_results": page_count if page_count < 100 else 100,
         "recommendations": results
     }
 
@@ -289,7 +304,7 @@ async def ats_system(user_id: str, job_id: int, request: ATSRequest):
         raise HTTPException(status_code=500, detail="Job embedding missing")
 
     # Get CV URL
-    cv_url = request.cv_url
+    cv_url = format_cv_url(request.cv_url)
     print(f"cv_url={cv_url}")
 
     
