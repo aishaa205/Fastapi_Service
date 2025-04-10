@@ -11,7 +11,7 @@ import torch
 import re
 import fitz  # PyMuPDf
 from io import BytesIO
-from googleapiclient.discovery import build
+# from googleapiclient.discovery import build
 from loguru import logger
 from functools import lru_cache
 import requests  # To download Cloudinary files
@@ -239,7 +239,8 @@ async def update_job(job_id: int, job: Job):
     existing_job = jobs_collection.find_one({"id": job_id})
     print(existing_job)
     if not existing_job:
-            raise HTTPException(status_code=404, detail="Job not found in mongodb")
+            result = jobs_collection.insert_one(updated_job)
+            return {"message": "Job created successfully", "id": str(result.inserted_id)}
     result = jobs_collection.update_one({"id": job_id}, {"$set": updated_job})
     print (result)
     if result.matched_count == 0:
