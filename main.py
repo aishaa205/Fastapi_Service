@@ -21,15 +21,21 @@ from typing import Optional
 security = HTTPBearer()
 from fastapi import Request
 import json
+import os
+
+from interview import router as interview_router
 
 
-DJANGO_AUTH_URL = "http://localhost:8000/api/token/verify/"
+
 
 
 app = FastAPI()
 #load  ats model
 
 model_1 = SentenceTransformer("all-MiniLM-L6-v2")
+
+
+app.include_router(interview_router, prefix="/api/v1")
 
 
 #load recommender model
@@ -93,7 +99,7 @@ def format_cv_url(cv_url):
 
 
 @app.get("/recom/")
-async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: int = 5):
+async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: int = 6):
     print("user_id",user_id)
     cv_url = format_cv_url(cv_url)
     print("cv_url",cv_url)
@@ -353,3 +359,36 @@ async def ats_system(user_id: str, job_id: int, request: ATSRequest):
     
     
 #matnse4 split to 2 different files + add test cases file for each 
+
+
+
+@app.post("/analyze-interview/")
+async def analyze_interview_endpoint(
+    video: UploadFile = File(...),
+    question: str = Form(...),
+    job_description: str = Form(...)
+):
+    """
+    Enhanced interview analysis endpoint that provides:
+    - Content relevance to job description
+    - Language proficiency assessment
+    - Presentation skills evaluation
+    - Voice tone analysis
+    """
+    try:
+        # Save video temporarily
+        temp_video_path = await save_temp_file(video)
+        
+        # Perform analysis
+        results = await analyzer.analyze_interview(
+            video_path=temp_video_path,
+            question=question,
+            job_description=job_description
+        )
+        
+        return results
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        if os.path.exists(temp_video_path):
+            os.remove(temp_video_path)
