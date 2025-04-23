@@ -354,9 +354,14 @@ async def ats_system(user_id: str, job_id: int, request: ATSRequest):
 
     return {"match_percentage": round(similarity_score * 100, 2), "message": "Higher score means a better match!"}
 
-@app.delete("/rag/{name}")
-async def delete_rag(name: str):
-    existing_rag = rag_names_collection.find_one({"name": name})
+@app.delete("/rag")
+async def delete_rag(name: str, id: str):
+    if id:
+        existing_rag = rag_names_collection.find_one({"_id": id})
+    elif name:
+        existing_rag = rag_names_collection.find_one({"name": name})
+    else:
+        raise HTTPException(status_code=400, detail="Please provide either id or name")
     
     if not existing_rag:
         raise HTTPException(status_code=404, detail="Rag not found")
@@ -365,7 +370,8 @@ async def delete_rag(name: str):
     
     if result.deleted_count == 0:
         raise HTTPException(status_code=404, detail="Rag not found in mongodb")
-    
+    if not name:
+        name = existing_rag["name"]
     result_embed = rag_collection.delete_many({"metadata": name})
     
     if result_embed.deleted_count == 0:
@@ -389,11 +395,11 @@ async def delete_all_rags():
     
 @app.post("/rag")
 async def rag_system(pdf: UploadFile = File(...)):
-    rag_name = rag_names_collection.find_one({"name": pdf.filename})
+    rag_name = rag_names_collection.find_one({"name": pdf.filename.replace(".pdf", "")})
     if rag_name:
         raise HTTPException(status_code=400, detail=f"Pdf with this name already uploaded on {rag_name['created_at']} GMT")
     else:
-        rag_names_collection.insert_one({"name": pdf.filename, "created_at": datetime.utcnow()})
+        rag_names_collection.insert_one({"name": pdf.filename.replace(".pdf", ""), "created_at": datetime.utcnow()})
     try:
         file_path = f"./temp/{pdf.filename}"
         with open(file_path, "wb") as f:
