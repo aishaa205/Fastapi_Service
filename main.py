@@ -26,6 +26,7 @@ import os
 from datetime import datetime
 import time
 import openai
+from dotenv import load_dotenv
 DJANGO_AUTH_URL = "http://localhost:8000/api/token/verify/"
 
 
@@ -45,6 +46,7 @@ async def startup_event():
     global model
     model = load_model()
     logger.info("ML Model Loaded Successfully!")
+    load_dotenv()
 
 def get_embedding(text):
     with torch.no_grad():
@@ -455,14 +457,9 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
     """
     query_text = question
     print(f"Received query: '{query_text}'")
-    # pdf_name = request.pdf_name
-    # k_chunks = request.k
-    # chat_history = request.chat_history # Get chat history from the request
 
     if not query_text:
          raise HTTPException(status_code=400, detail="Question is required.")
-
-    # print(f"Received query: '{query_text}' for PDF: '{pdf_name}' with history length {len(chat_history)}")
 
     try:
         # 1. Get embedding for the user query
@@ -476,31 +473,22 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
 
         # 2. Search MongoDB for relevant chunks using vector search
         start_time_search = time.time()
-        # This assumes you have a vector search index named 'vector_index'
-        # on the 'embedding' field in your 'rag_collection', and filtered by 'metadata'.
-        # Adjust the index name and search parameters as needed for your setup.
-        # The search is still based on the *current* query embedding to find relevant context for THIS turn.
         search_results = list(rag_collection.aggregate([
-            # {
-            #     "$match": {
-            #         "metadata": pdf_name # Filter documents by PDF name
-            #     }
-            # },
             {
                 "$vectorSearch": {
                     "index": "rag_index",
                     "queryVector": query_embedding,
                     "path": "embedding",
-                    "numCandidates": 1000, # Number of candidates to scan (heuristic, adjust as needed)
-                    "limit": 10, # Number of results to return,
+                    "numCandidates": 1000,
+                    "limit": 10,
                     "metric": "cosine"
                 }
             },
             {
                  "$project": {
-                    "_id": 0, # Exclude _id
-                    "text": 1, # Include the text chunk
-                    "score": { "$meta": "vectorSearchScore" } # Include the search score
+                    "_id": 0,
+                    "text": 1,
+                    "score": { "$meta": "vectorSearchScore" }
                  }
             }
         ]))
@@ -512,14 +500,10 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
 
         # Handle case where PDF doesn't exist or no relevant chunks found for current query
         if not search_results:
-            #  pdf_exists = rag_names_collection.find_one({"name": pdf_name}) is not None
-            #  if not pdf_exists:
-            #       raise HTTPException(status_code=404, detail=f"PDF '{pdf_name}' not found in the system.")
             if not chat_history:
                   # No search results and no history, return specific message
                   return {"answer": f"Could not find relevant information for the question based on the content in our database. Please try rephrasing your question."}
              # If search results are empty but there IS chat history, we still proceed
-             # to let the model try to answer based on history, though it might fail without new context.
             print("No new relevant chunks found, relying on history and prompt.")
 
 
@@ -540,8 +524,6 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
         messages.extend(chat_history)
 
         # Add the current user query, incorporating the retrieved context
-        # It's common to inject the context with the *latest* user message or just before it.
-        # Adding context to the current user message helps the model focus on it for the immediate query.
         current_user_message_content = f"Context:\n{context}\n\nQuestion: {query_text}"
 
         messages.append({
@@ -553,13 +535,13 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
         # print("Messages structure:", messages) # Uncomment to debug the full message structure
 
         # 5. Call OpenAI API
-        openai_client = openai.OpenAI(api_key='$$$$$$$')
         start_time_openai = time.time()
-        # Use the chat completions endpoint
-        response = openai_client.chat.completions.create(
-            model="gpt-4o-mini", # Or a model with a larger context window like gpt-4 or gpt-4o
+        openai.api_key = os.getenv('OPEN_AI')
+        response = openai.chat.completions.create(
+            model="gpt-3.5-turbo",
             messages=messages,
-            temperature=0.1 # Lower temperature for more focused answers
+            temperature=0.1,
+            max_tokens = 300
         )
         time_taken_openai = round(time.time() - start_time_openai, 2)
         print(f"Time taken for OpenAI API call: {time_taken_openai} seconds")
