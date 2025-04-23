@@ -23,6 +23,9 @@ from fastapi import Request
 import json
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import os
+from datetime import datetime
+import time
+import openai
 DJANGO_AUTH_URL = "http://localhost:8000/api/token/verify/"
 
 
@@ -386,7 +389,7 @@ async def delete_all_rags():
 async def rag_system(pdf: UploadFile = File(...)):
     rag_name = rag_names_collection.find_one({"name": pdf.filename})
     if rag_name:
-        raise HTTPException(status_code=400, detail=f"Pdf with this name already uploaded on {rag_name['created_at']}")
+        raise HTTPException(status_code=400, detail=f"Pdf with this name already uploaded on {rag_name['created_at']} GMT")
     else:
         rag_names_collection.insert_one({"name": pdf.filename, "created_at": datetime.utcnow()})
     try:
@@ -398,6 +401,7 @@ async def rag_system(pdf: UploadFile = File(...)):
         chunks = process_pdf_and_get_chunks(file_path, pdf.filename.replace(".pdf", ""))
         end_time = time.time()
         time_taken = end_time - start_time
+        time_taken = round(time_taken, 2)
         print(f"Time taken to process PDF: {time_taken} seconds")
 
         rag_collection.insert_many(chunks)
@@ -442,5 +446,137 @@ def process_pdf_and_get_chunks(file_path: str, pdf: str):
         print(f"An error occurred during PDF processing: {e}")
         # Raise HTTPException to return a proper API error response
         raise HTTPException(status_code=500, detail=f"Failed to process PDF: {e}")
+
+@app.post("/ask_rag")
+async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
+    """
+    Performs a RAG query against indexed PDF data in MongoDB, includes chat history,
+    and asks OpenAI.
+    """
+    query_text = question
+    print(f"Received query: '{query_text}'")
+    # pdf_name = request.pdf_name
+    # k_chunks = request.k
+    # chat_history = request.chat_history # Get chat history from the request
+
+    if not query_text:
+         raise HTTPException(status_code=400, detail="Question is required.")
+
+    # print(f"Received query: '{query_text}' for PDF: '{pdf_name}' with history length {len(chat_history)}")
+
+    try:
+        # 1. Get embedding for the user query
+        start_time_embedding = time.time()
+        query_embedding = get_embedding(query_text)
+        time_taken_embedding = round(time.time() - start_time_embedding, 2)
+        print(f"Time taken to embed query: {time_taken_embedding} seconds")
+
+        if not query_embedding:
+             raise HTTPException(status_code=500, detail="Failed to generate embedding for the query.")
+
+        # 2. Search MongoDB for relevant chunks using vector search
+        start_time_search = time.time()
+        # This assumes you have a vector search index named 'vector_index'
+        # on the 'embedding' field in your 'rag_collection', and filtered by 'metadata'.
+        # Adjust the index name and search parameters as needed for your setup.
+        # The search is still based on the *current* query embedding to find relevant context for THIS turn.
+        search_results = list(rag_collection.aggregate([
+            # {
+            #     "$match": {
+            #         "metadata": pdf_name # Filter documents by PDF name
+            #     }
+            # },
+            {
+                "$vectorSearch": {
+                    "index": "rag_index",
+                    "queryVector": query_embedding,
+                    "path": "embedding",
+                    "numCandidates": 1000, # Number of candidates to scan (heuristic, adjust as needed)
+                    "limit": 10, # Number of results to return,
+                    "metric": "cosine"
+                }
+            },
+            {
+                 "$project": {
+                    "_id": 0, # Exclude _id
+                    "text": 1, # Include the text chunk
+                    "score": { "$meta": "vectorSearchScore" } # Include the search score
+                 }
+            }
+        ]))
+        time_taken_search = round(time.time() - start_time_search, 2)
+        print(f"Time taken for vector search: {time_taken_search} seconds. Found {len(search_results)} results.")
+
+        # 3. Format the retrieved chunks as context
+        context = "\n\n---\n\n".join([doc["text"] for doc in search_results])
+
+        # Handle case where PDF doesn't exist or no relevant chunks found for current query
+        if not search_results:
+            #  pdf_exists = rag_names_collection.find_one({"name": pdf_name}) is not None
+            #  if not pdf_exists:
+            #       raise HTTPException(status_code=404, detail=f"PDF '{pdf_name}' not found in the system.")
+            if not chat_history:
+                  # No search results and no history, return specific message
+                  return {"answer": f"Could not find relevant information for the question based on the content in our database. Please try rephrasing your question."}
+             # If search results are empty but there IS chat history, we still proceed
+             # to let the model try to answer based on history, though it might fail without new context.
+            print("No new relevant chunks found, relying on history and prompt.")
+
+
+        # 4. Prepare messages for OpenAI, including history and context
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You are a helpful assistant that answers questions based *primarily* on the provided context. "
+                    "Use the chat history to understand the conversation flow and user intent. "
+                    "If the answer cannot be found in the *provided context* and the history doesn't provide enough information, respond with 'I am sorry, but the information needed to answer this question is not available in the provided document or previous conversation context.' "
+                    "Do not use external knowledge. Keep the answer concise and directly address the user's question."
+                )
+            }
+        ]
+
+        # Add previous chat history to the messages list
+        messages.extend(chat_history)
+
+        # Add the current user query, incorporating the retrieved context
+        # It's common to inject the context with the *latest* user message or just before it.
+        # Adding context to the current user message helps the model focus on it for the immediate query.
+        current_user_message_content = f"Context:\n{context}\n\nQuestion: {query_text}"
+
+        messages.append({
+            "role": "user",
+            "content": current_user_message_content
+        })
+
+        print(f"Sending {len(messages)} messages to OpenAI API.")
+        # print("Messages structure:", messages) # Uncomment to debug the full message structure
+
+        # 5. Call OpenAI API
+        openai_client = openai.OpenAI(api_key='$$$$$$$')
+        start_time_openai = time.time()
+        # Use the chat completions endpoint
+        response = openai_client.chat.completions.create(
+            model="gpt-4o-mini", # Or a model with a larger context window like gpt-4 or gpt-4o
+            messages=messages,
+            temperature=0.1 # Lower temperature for more focused answers
+        )
+        time_taken_openai = round(time.time() - start_time_openai, 2)
+        print(f"Time taken for OpenAI API call: {time_taken_openai} seconds")
+
+        # 6. Extract the answer
+        answer = response.choices[0].message.content.strip()
+
+        # 7. Return the answer
+        # The client is responsible for adding the current query and this answer to its history
+        return {"answer": answer}
+
+    except HTTPException as e:
+        # Re-raise HTTPExceptions
+        raise e
+    except Exception as e:
+        print(f"An error occurred during RAG query with history: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
 
 #matnse4 split to 2 different files + add test cases file for each 
