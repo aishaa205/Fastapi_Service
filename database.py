@@ -12,3 +12,5 @@ print(client.list_database_names())
 db = client[DB_NAME]
 jobs_collection = db["jobs"]
 users_collection=db["user_cv_db"]
+rag_collection=db["Rag"]
+rag_names_collection = db["rag_names"]

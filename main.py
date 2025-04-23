@@ -2,7 +2,7 @@ import sys
 sys.path.append("..") 
 from sentence_transformers import SentenceTransformer , util
 from fastapi import FastAPI , HTTPException ,Query, UploadFile, File, Form , Header, Depends
-from database import jobs_collection ,users_collection
+from database import jobs_collection ,users_collection, rag_collection, rag_names_collection
 from pydantic import BaseModel,validator
 # from bson import ObjectId
 import torch
@@ -21,21 +21,21 @@ from typing import Optional
 security = HTTPBearer()
 from fastapi import Request
 import json
-
-
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+import os
 DJANGO_AUTH_URL = "http://localhost:8000/api/token/verify/"
 
 
 app = FastAPI()
 #load  ats model
 
-model_1 = SentenceTransformer("all-MiniLM-L6-v2")
+# model_1 = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 #load recommender model
 def load_model():
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    return SentenceTransformer("paraphrase-MiniLM-L6-v2", device=device)
+    # device = "cuda" if torch.cuda.is_available() else "cpu"
+    return SentenceTransformer("paraphrase-MiniLM-L6-v2", device="cpu")
 
 @app.on_event("startup")
 async def startup_event():
@@ -348,8 +348,99 @@ async def ats_system(user_id: str, job_id: int, request: ATSRequest):
         raise HTTPException(status_code=500, detail="Similarity computation failed")
 
     return {"match_percentage": round(similarity_score * 100, 2), "message": "Higher score means a better match!"}
+
+@app.delete("/rag/{name}")
+async def delete_rag(name: str):
+    existing_rag = rag_names_collection.find_one({"name": name})
     
+    if not existing_rag:
+        raise HTTPException(status_code=404, detail="Rag not found")
     
+    result = rag_names_collection.delete_one({"name": name})
     
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="Rag not found in mongodb")
     
+    result_embed = rag_collection.delete_many({"metadata": name})
+    
+    if result_embed.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="No embedded documents found for the given RAG")
+    
+    return {"message": "Rag and its embedded documents deleted successfully"}
+
+@app.delete("/allrag")
+async def delete_all_rags():
+    result = rag_names_collection.delete_many({})
+    
+    if result.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="No Rags found")
+    
+    result_embed = rag_collection.delete_many({})
+
+    if result_embed.deleted_count == 0:
+        raise HTTPException(status_code=404, detail="No embedded documents found for the given RAG")
+    
+    return {"message": "All Rags and their embedded documents deleted successfully"}
+    
+@app.post("/rag")
+async def rag_system(pdf: UploadFile = File(...)):
+    rag_name = rag_names_collection.find_one({"name": pdf.filename})
+    if rag_name:
+        raise HTTPException(status_code=400, detail=f"Pdf with this name already uploaded on {rag_name['created_at']}")
+    else:
+        rag_names_collection.insert_one({"name": pdf.filename, "created_at": datetime.utcnow()})
+    try:
+        file_path = f"./temp/{pdf.filename}"
+        with open(file_path, "wb") as f:
+            f.write(pdf.file.read())
+        
+        start_time = time.time()
+        chunks = process_pdf_and_get_chunks(file_path, pdf.filename.replace(".pdf", ""))
+        end_time = time.time()
+        time_taken = end_time - start_time
+        print(f"Time taken to process PDF: {time_taken} seconds")
+
+        rag_collection.insert_many(chunks)
+        os.remove(file_path)
+        return {"message": f"PDF uploaded and processed successfully in {time_taken} seconds"}
+    except Exception as e:
+        print(f"Error processing PDF: {e}")
+        raise HTTPException(status_code=500, detail="PDF processing failed")
+
+def process_pdf_and_get_chunks(file_path: str, pdf: str):
+    print(f"Processing PDF with PyPDFLoader: {file_path}")
+    try:
+        # Load PDF using PyMuPDF
+        pdf_stream = BytesIO(open(file_path, "rb").read())
+        doc = fitz.open(stream=pdf_stream, filetype="pdf")
+        text = "\n".join([page.get_text("text") for page in doc])
+        doc.close()
+
+        if not text:
+            raise HTTPException(status_code=400, detail="No text found in PDF.")
+        
+        # Split the text into chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=150,
+            length_function=len,
+        )
+        chunked_text = text_splitter.split_text(text)
+        
+        chunks_with_metadata = []
+        for chunk in chunked_text:
+            chunk_data = {
+                "text": chunk,
+                "embedding": get_embedding(chunk),
+                "metadata": pdf
+            }
+            chunks_with_metadata.append(chunk_data)
+        
+        print(f"Successfully split PDF into {len(chunks_with_metadata)} chunks.")
+        return chunks_with_metadata
+    except Exception as e:
+        print(f"An error occurred during PDF processing: {e}")
+        # Raise HTTPException to return a proper API error response
+        raise HTTPException(status_code=500, detail=f"Failed to process PDF: {e}")
+
 #matnse4 split to 2 different files + add test cases file for each 
