@@ -3,7 +3,7 @@ sys.path.append("..")
 from sentence_transformers import SentenceTransformer , util
 from fastapi import FastAPI , HTTPException ,Query, UploadFile, File, Form , Header, Depends
 from database import jobs_collection ,users_collection, rag_collection, rag_names_collection
-from pydantic import BaseModel,validator
+from pydantic import BaseModel,validator,field_validator
 import torch
 # from sklearn.feature_extraction.text import TfidfVectorizer
 # from sklearn.metrics.pairwise import cosine_similarity
@@ -17,7 +17,6 @@ import requests  # To download Cloudinary files
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 # from bson.errors import InvalidId
-security = HTTPBearer()
 from fastapi import Request
 import json
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -35,7 +34,7 @@ import requests
 # import traceback
 # from deepface import DeepFace
 # import easyocr
-
+from contextlib import asynccontextmanager
 
 
 
@@ -48,28 +47,44 @@ import requests
 
 DJANGO_AUTH_URL = "http://localhost:8000/api/token/verify/"
 
-
-app = FastAPI()
+security = HTTPBearer()
+# app = FastAPI()
 #load  ats model
 
 # model_1 = SentenceTransformer("all-MiniLM-L6-v2")
 
 
 #load recommender model
-def load_model():
-    # device = "cuda" if torch.cuda.is_available() else "cpu"
-    return SentenceTransformer("paraphrase-MiniLM-L6-v2", device="cpu")
+# def load_model():
+#     # device = "cuda" if torch.cuda.is_available() else "cpu"
+#     return SentenceTransformer("paraphrase-MiniLM-L6-v2", device="cpu")
 
-@app.on_event("startup")
-async def startup_event():
-    global model
-    model = load_model()
-    logger.info("ML Model Loaded Successfully!")
-    load_dotenv()
+# @app.on_event("startup")
+# async def startup_event():
+#     global model
+#     model = load_model()
+#     logger.info("ML Model Loaded Successfully!")
+#     load_dotenv()
 
-def get_embedding(text):
-    with torch.no_grad():
-        return model.encode(text, convert_to_tensor=True).tolist()
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup logic
+    global model, ats_model
+    # Load main recommendation model
+    model = SentenceTransformer("paraphrase-MiniLM-L6-v2", device="cpu")
+    logger.info("Recommendation model loaded.")
+    # Load ATS model
+    ats_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+    logger.info("ATS model loaded.")
+    yield
+    # Shutdown logic (if any)
+    logger.info("Shutting down FastAPI application.")
+
+app = FastAPI(lifespan=lifespan)
+
+# def get_embedding(text):
+#     with torch.no_grad():
+#         return model.encode(text, convert_to_tensor=True).tolist()
 
 
 async def recommend_jobs_background(user_skills: str):
@@ -215,17 +230,31 @@ class Job(BaseModel):
      , 'type_of_job': 'Full-time', 'experince': 'Mid-level', 'company': 8, 'company_name': 'Aisha Amr', 'company_logo': None}
     
 
-    @validator("title", "description")
-    def must_not_be_empty(cls, value):
-        if not value.strip():
-            raise ValueError("Field cannot be empty")
-        return value
+    # @validator("title", "description")
+    # def must_not_be_empty(cls, value):
+    #     if not value.strip():
+    #         raise ValueError("Field cannot be empty")
+    #     return value
 
-    @validator("id")
-    def must_have_id(cls, value):
-        if not value:
+    # @validator("id")
+    # def must_have_id(cls, value):
+    #     if not value:
+    #         raise ValueError("Must include job ID")
+    #     return value
+    
+    @field_validator("title", "description")
+    @classmethod
+    def non_empty(cls, v: str) -> str:
+        if not v.strip():
+            raise ValueError("Field cannot be empty")
+        return v
+
+    @field_validator("id")
+    @classmethod
+    def must_have_id(cls, v: int) -> int:
+        if v is None:
             raise ValueError("Must include job ID")
-        return value
+        return v
 
 
 
