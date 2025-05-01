@@ -18,7 +18,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from typing import Optional
 # from bson.errors import InvalidId
 security = HTTPBearer()
-from fastapi import Request
+from fastapi import Request, BackgroundTasks
 import json
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 import os
@@ -53,7 +53,6 @@ app = FastAPI()
 #load  ats model
 
 # model_1 = SentenceTransformer("all-MiniLM-L6-v2")
-
 
 #load recommender model
 def load_model():
@@ -226,19 +225,35 @@ class Job(BaseModel):
         if not value:
             raise ValueError("Must include job ID")
         return value
-
-
+def recommend_emails(job):
+    try:
+        results = list(users_collection.aggregate([
+            {
+                "$vectorSearch": {
+                    "index": "default",
+                    "queryVector": job["combined_embedding"],
+                    "path": "embedding",
+                    "numCandidates": 1000,
+                    "limit": 10,
+                    "metric": "cosine"
+                }
+            }
+        ]))
+        mail = os.getenv("MAIL_SERVICE")
+        front = os.getenv("FRONT")
+        requests.post(mail + "/send_recommendation", json={"emails": [user["email"] for user in results], "job_title": job["title"], 'job_link': front + "applicant/jobs/" + str(job["id"]), 'company_name': job["company_name"]})
+    except Exception as e:
+        print(e)
+    return {"message": "Emails sent successfully"}
 
 
 # @app.post("/jobs", dependencies=[Depends(verify_token)])
 @app.post("/jobs")
-async def create_job(job: Job, request: Request):
-    print("job",job)
+async def create_job(job: Job, request: Request, background_tasks: BackgroundTasks):
     job_data = job.dict()
-    print("job_data",job_data)
     job_data["combined_embedding"] = get_embedding(job_data["description"] + " " + " ".join(job_data["title"]))
     inserted_job = jobs_collection.insert_one(job_data)
-    print("inserted_job",inserted_job)
+    background_tasks.add_task(recommend_emails, job_data)
     return {"id": str(inserted_job.inserted_id),
             "message": "Job created successfully",
             #"mongodb_id": str(inserted_job.inserted_id)
