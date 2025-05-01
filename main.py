@@ -31,10 +31,10 @@ from PIL import Image
 from io import BytesIO
 # import face_recognition
 import requests
-import tempfile
-import traceback
-from deepface import DeepFace
-import easyocr
+# import tempfile
+# import traceback
+# from deepface import DeepFace
+# import easyocr
 
 
 
