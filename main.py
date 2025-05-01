@@ -118,79 +118,87 @@ def format_cv_url(cv_url):
 
 @app.get("/recom/")
 async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: int = 5):
-    print("user_id",user_id)
-    cv_url = format_cv_url(cv_url)
-    print("cv_url",cv_url)
-    print("page",page)
-    if page < 1:
-        raise HTTPException(status_code=400, detail="Page number must be 1 or higher")
+    try:
+        print("user_id",user_id)
+        cv_url = format_cv_url(cv_url)
+        print("cv_url",cv_url)
+        print("page",page)
+        if page < 1:
+            raise HTTPException(status_code=400, detail="Page number must be 1 or higher")
 
-    user_data = users_collection.find_one({"user_id": user_id})
-    page_count= jobs_collection.count_documents({}) // page_size + 1
-    if page*page_size > 100:
-        raise HTTPException(status_code=400, detail="Max recommendations is 100")
-    if page > page_count/page_size:
-        raise HTTPException(status_code=400, detail="Page number exceeds available pages")
-    if not cv_url:
-        raise HTTPException(status_code=400, detail="CV URL is required")
-    if not user_id:
-        raise HTTPException(status_code=400, detail="User ID is required")
-    if user_data:
-        stored_cv_url = user_data.get("cv_url")
-        if stored_cv_url == cv_url:
-            print("Using stored embedding (CV unchanged)")
-            query_vector = user_data["embedding"]
+        user_data = users_collection.find_one({"user_id": user_id})
+        page_count= jobs_collection.count_documents({}) // page_size + 1
+        print("page_count",page_count)
+        if page_count == 0:
+            raise HTTPException(status_code=404, detail="No jobs found")
+        if page*page_size > 100:
+            raise HTTPException(status_code=400, detail="Max recommendations is 100")
+        if page > page_count/page_size and page > 1:
+            raise HTTPException(status_code=400, detail="Page number exceeds available pages")
+        if not cv_url:
+            raise HTTPException(status_code=400, detail="CV URL is required")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+        if user_data:
+            stored_cv_url = user_data.get("cv_url")
+            if stored_cv_url == cv_url:
+                print("Using stored embedding (CV unchanged)")
+                query_vector = user_data["embedding"]
+            else:
+                print("CV updated, generating new embedding")
+                extracted_text = extract_text_from_pdf_cloud(cv_url)
+                query_vector = get_embedding(extracted_text)
+                users_collection.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"embedding": query_vector, "cv_url": cv_url}}  
+                )
         else:
-            print("CV updated, generating new embedding")
+            print("New user, extracting CV text")
             extracted_text = extract_text_from_pdf_cloud(cv_url)
             query_vector = get_embedding(extracted_text)
-            users_collection.update_one(
-                {"user_id": user_id},
-                {"$set": {"embedding": query_vector, "cv_url": cv_url}}  
+            users_collection.insert_one(
+                {"user_id": user_id, "embedding": query_vector, "cv_url": cv_url} 
             )
-    else:
-        print("New user, extracting CV text")
-        extracted_text = extract_text_from_pdf_cloud(cv_url)
-        query_vector = get_embedding(extracted_text)
-        users_collection.insert_one(
-            {"user_id": user_id, "embedding": query_vector, "cv_url": cv_url} 
-        )
-    skip = (page - 1) * page_size
-    pipeline = [
-        {
-            "$vectorSearch": {
-                "index": "vector",
-                "path": "combined_embedding",
-                "queryVector": query_vector,
-                "numCandidates": 500,
-                "limit": 100,
-                "metric": "cosine"
-            }
-        },
-        {
-            "$project": {
-                "_id": 0,
-                "id": 1,
-                "title": 1,
-                "description": 1,
-                "score": {"$meta": "vectorSearchScore"}
-            }
-        },
-        {"$skip": skip},  # Skip previous pages
-        {"$limit": page_size}  #  Limit results per page
-    ]
+        skip = (page - 1) * page_size
+        pipeline = [
+            {
+                "$vectorSearch": {
+                    "index": "vector",
+                    "path": "combined_embedding",
+                    "queryVector": query_vector,
+                    "numCandidates": 500,
+                    "limit": 100,
+                    "metric": "cosine"
+                }
+            },
+            {
+                "$project": {
+                    "_id": 0,
+                    "id": 1,
+                    "title": 1,
+                    "description": 1,
+                    "score": {"$meta": "vectorSearchScore"}
+                }
+            },
+            {"$skip": skip},  # Skip previous pages
+            {"$limit": page_size}  #  Limit results per page
+        ]
 
-    results = list(jobs_collection.aggregate(pipeline))
+        results = list(jobs_collection.aggregate(pipeline))
 
-    if not results:
-        raise HTTPException(status_code=404, detail="No matching jobs found")
+        if not results:
+            raise HTTPException(status_code=404, detail="No matching jobs found")
 
-    return {
-        "page": page,
-        "page_size": page_size,
-        "total_results": page_count if page_count < 100 else 100,
-        "recommendations": results
-    }
+        return {
+            "page": page,
+            "page_size": page_size,
+            "total_results": page_count if page_count < 100 else 100,
+            "recommendations": results
+        }
+
+    except Exception as e:
+        print(e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 class Job(BaseModel):
     id: int
