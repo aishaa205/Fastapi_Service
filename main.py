@@ -36,7 +36,7 @@ import requests
 # from deepface import DeepFace
 # import easyocr
 from contextlib import asynccontextmanager
-
+load_dotenv()
 
 
 # from some_fraud_detection_lib import is_fake_id
@@ -581,10 +581,12 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
             {
                 "role": "system",
                 "content": (
-                    "You are a helpful assistant that answers questions based *primarily* on the provided context. "
-                    "Use the chat history to understand the conversation flow and user intent. "
-                    "If the answer cannot be found in the *provided context* and the history doesn't provide enough information, respond with 'I am sorry, but the information needed to answer this question is not available in the provided document or previous conversation context.' "
-                    "Do not use external knowledge. Keep the answer concise and directly address the user's question."
+                    "Dont metion anything about being looking at a provided context. "
+                    "You are a helpful assistant that answers questions based on the provided context. "
+                    "You can use external knowledge if needed but with a focus on the provided context. "
+                    # "Use the chat history to understand the conversation flow and user intent. "
+                    # "If the answer cannot be found in the *provided context* and the history doesn't provide enough information, respond with 'I am sorry, but the information needed to answer this question is not available in the provided document or previous conversation context.' "
+                    # "Do not use external knowledge. Keep the answer concise and directly address the user's question."
                 )
             }
         ]
@@ -610,14 +612,14 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
             model="gpt-3.5-turbo",
             messages=messages,
             temperature=0.1,
-            max_tokens = 300
+            max_tokens = 384
         )
         time_taken_openai = round(time.time() - start_time_openai, 2)
         print(f"Time taken for OpenAI API call: {time_taken_openai} seconds")
 
         # 6. Extract the answer
         answer = response.choices[0].message.content.strip()
-
+        print("Answer:", answer)
         # 7. Return the answer
         # The client is responsible for adding the current query and this answer to its history
         return {"answer": answer}
