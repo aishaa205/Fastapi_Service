@@ -460,6 +460,8 @@ async def rag_system(pdf: UploadFile = File(...)):
     # if rag_name:
     #     raise HTTPException(status_code=400, detail=f"Pdf with this name already uploaded on {rag_name['created_at']} GMT")
     # else:
+    # Create the temp directory if it doesn't exist
+    os.makedirs("./temp", exist_ok=True)
     rag_names_collection.insert_one({"name": pdf.filename.replace(".pdf", ""), "created_at": datetime.utcnow()})
     try:
         file_path = f"./temp/{pdf.filename}"
