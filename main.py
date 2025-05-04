@@ -26,11 +26,18 @@ from datetime import datetime
 import time
 import openai
 from dotenv import load_dotenv
-
+import requests
 from PIL import Image
 from io import BytesIO
+##### for resume parser ######
+from typing import Dict
+# import requests, fitz
+# from io import BytesIO
+from transformers import pipeline
+
+
 # import face_recognition
-import requests
+
 # import tempfile
 # import traceback
 # from deepface import DeepFace
@@ -53,6 +60,8 @@ app = FastAPI()
 #load  ats model
 
 # model_1 = SentenceTransformer("all-MiniLM-L6-v2")
+
+################# Recommender model ################
 
 #load recommender model
 def load_model():
@@ -607,6 +616,100 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
     except Exception as e:
         print(f"An error occurred during RAG query with history: {e}")
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+
+
+############### Automatic Resume Parser ################
+ 
+
+# summarizer = pipeline("summarization", model="facebook/bart-large-cnn")
+# ner = pipeline("ner", grouped_entities=True)
+# classifier = pipeline("zero-shot-classification")
+
+# class CVParseRequest(BaseModel):
+#     cv_url: str
+
+# @app.post("/extract-cv/")
+# def extract_cv(request: CVParseRequest) -> Dict:
+#     try:
+#         pdf_url = f"https://res.cloudinary.com/{CLOUDINARY_CLOUD_NAME}/raw/upload/{request.cv_url}.pdf"
+#         response = requests.get(pdf_url)
+#         response.raise_for_status()
+#         doc = fitz.open(stream=BytesIO(response.content), filetype="pdf")
+#         text = "\n".join([page.get_text("text") for page in doc])
+#         doc.close()
+#     except Exception as e:
+#         raise HTTPException(status_code=400, detail=str(e))
+
+#     entities = ner(text)
+#     skills = [e['word'] for e in entities if e['entity_group'] == 'MISC' or 'SKILL' in e['entity_group']]
+    
+#     about = summarizer(text[:2000])[0]['summary_text']
+    
+#     # Example parsing logic – adjust as needed
+#     education = [line for line in text.split('\n') if 'university' in line.lower() or 'bachelor' in line.lower()]
+#     experience = [line for line in text.split('\n') if 'experience' in line.lower() or 'worked' in line.lower()]
+
+#     return {
+#         "skills": list(set(skills)),
+#         "about": about,
+#         "education": education[:5],
+#         "experience": experience[:5]
+#     }
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
 
