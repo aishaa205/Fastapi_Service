@@ -74,7 +74,7 @@ async def lifespan(app: FastAPI):
     model = SentenceTransformer("paraphrase-MiniLM-L6-v2", device="cpu")
     logger.info("Recommendation model loaded.")
     # Load ATS model
-    ats_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
+    # ats_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     logger.info("ATS model loaded.")
     yield
     # Shutdown logic (if any)
@@ -121,7 +121,7 @@ def format_cv_url(cv_url):
 
 
 @app.get("/recom/")
-async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: int = 5):
+async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: int = 5):
     try:
         print("user_id",user_id)
         cv_url = format_cv_url(cv_url)
@@ -184,8 +184,8 @@ async def recommend_jobs(user_id: str, cv_url: str, page: int = 1, page_size: in
                     "score": {"$meta": "vectorSearchScore"}
                 }
             },
-            {"$skip": skip},  # Skip previous pages
-            {"$limit": page_size}  #  Limit results per page
+            {"$skip": skip}, 
+            {"$limit": page_size}
         ]
 
         results = list(jobs_collection.aggregate(pipeline))
@@ -351,7 +351,7 @@ def calculate_embedding_similarity(cv_text, job_text):
 
 
 @app.post("/ats/{user_id}/{job_id}/")
-async def ats_system(user_id: str, job_id: int, request: ATSRequest):
+async def ats_system(user_id: int, job_id: int, request: ATSRequest):
     
     print(f"Received request for user_id={user_id}, job_id={job_id}")
 
@@ -632,301 +632,64 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
 
+@app.get("/top_talents")
+async def top_talents(job_id: int, page: int = 1, page_size: int = 5):
+    try:
+        if not job_id:
+            raise HTTPException(status_code=400, detail="Job ID is required")
+        if page < 1 or page_size < 1:
+            raise HTTPException(status_code=400, detail="Page numbers must be 1 or higher")
+
+        page_count= users_collection.count_documents({'embedding': {'$exists': True}})
+
+        if page_count == 0:
+            raise HTTPException(status_code=404, detail="No users found")
+        if page*page_size > 100:
+            raise HTTPException(status_code=400, detail="Max recommendations is 100")
+        if page > page_count/page_size and page > 1:
+            raise HTTPException(status_code=400, detail="Page number exceeds available pages")
+
+        job = jobs_collection.find_one({"id": job_id})
+        if not job:
+            raise HTTPException(status_code=404, detail="Job not found")
+        combined_embedding = job["combined_embedding"]
+        if not combined_embedding:
+            raise HTTPException(status_code=500, detail="Combined embedding not found for the job")
+
+        # Get top talents
+        skip = (page - 1) * page_size
+        results = list(users_collection.aggregate([
+            {
+                "$vectorSearch": {
+                    "index": "default",
+                    "queryVector": job["combined_embedding"],
+                    "path": "embedding",
+                    "numCandidates": 1000,
+                    "limit": 100,
+                    "metric": "cosine"
+                }
+            },
+            {
+                 "$project": {
+                    "_id": 0,
+                    "id": '$user_id',
+                    "ats_res": { "$meta": "vectorSearchScore" },
+                    "name": 1,
+                    "email": 1
+                 }
+            },
+            {"$skip": skip},  # Skip previous pages
+            {"$limit": page_size}  #  Limit results per page
+        ]))
+
+        if not results or len(results) == 0:
+            raise HTTPException(status_code=404, detail="No matching talents found")
+        # print(results)
+        return {
+            "count": page_count if page_count < 100 else 100,
+            "results": results
+        }
+    except Exception as e:
+        print(f"An error occurred while retrieving the job: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
-
-################  fraud detection  ################
-
-
-
-
-
-
-
-# reader = easyocr.Reader(['ar'])
-
-# # Roboflow settings
-# ROBOFLOW_API_KEY = os.getenv("ROBOFLOW_API_KEY")
-# ROBOFLOW_National_ID_MODEL = "https://detect.roboflow.com/egyptian-ids-2/1"
-# FAKE_MODEL_URL = "https://detect.roboflow.com/fake-id-model/1"
-
-
-# def arabic_to_western_digits(text):
-#     arabic_digits = '٠١٢٣٤٥٦٧٨٩'
-#     western_digits = '0123456789'
-#     return text.translate(str.maketrans(arabic_digits, western_digits))
-
-
-# def extract_text_from_image(image_data):
-#     img = Image.open(BytesIO(image_data)).convert("RGB")
-#     result = reader.readtext(np.array(img), detail=0, paragraph=True)
-#     text = " ".join(result)
-#     return arabic_to_western_digits(text)
-
-
-# def extract_dob_from_national_id(nid):
-#     if len(nid) != 14:
-#         return None
-#     century = '19' if nid[0] == '2' else '20'
-#     return f"{century}{nid[1:3]}-{nid[3:5]}-{nid[5:7]}"
-
-
-# def compare_faces(img1_data, img2_data):
-#     try:
-#         with tempfile.NamedTemporaryFile(suffix=".jpg") as f1, tempfile.NamedTemporaryFile(suffix=".jpg") as f2:
-#             f1.write(img1_data)
-#             f1.flush()
-#             f2.write(img2_data)
-#             f2.flush()
-#             result = DeepFace.verify(f1.name, f2.name, enforce_detection=False)
-#             return result["verified"]
-#     except Exception as e:
-#         print("DeepFace error:", e)
-#         return False
-
-
-# def call_roboflow_model(image_data, model_url):
-#     try:
-#         response = requests.post(
-#             model_url,
-#             files={"file": ("image.jpg", image_data, "image/jpeg")},
-#             headers={"Authorization": f"Bearer {ROBOFLOW_API_KEY}"}
-#         )
-#         response.raise_for_status()
-#         return response.json()
-#     except Exception as e:
-#         print("Roboflow error:", e)
-#         return None
-
-
-# @app.post("/verify-id/")
-# async def verify_id(
-#     national_id: str = Form(...),
-#     dob: str = Form(...),
-#     national_id_img: UploadFile = File(...),
-#     selfie_img: UploadFile = File(None)
-# ):
-#     try:
-#         img_data = await national_id_img.read()
-#         selfie_data = await selfie_img.read() if selfie_img else None
-
-#         # 1. Roboflow front-side detection
-#         front_check = call_roboflow_model(img_data, FRONT_MODEL_URL)
-#         if not front_check or not any(pred['class'] == "front" for pred in front_check.get("predictions", [])):
-#             raise HTTPException(status_code=400, detail="Not the front side of the ID")
-
-#         # 2. Roboflow fake ID detection
-#         fake_check = call_roboflow_model(img_data, FAKE_MODEL_URL)
-#         if fake_check and any(pred['class'] == "fake" for pred in fake_check.get("predictions", [])):
-#             raise HTTPException(status_code=400, detail="Fake ID detected")
-
-#         # 3. OCR + Arabic digit conversion
-#         extracted_text = extract_text_from_image(img_data)
-#         if national_id not in extracted_text:
-#             raise HTTPException(status_code=400, detail="National ID not found in image")
-
-#         # 4. DOB verification
-#         extracted_dob = extract_dob_from_national_id(national_id)
-#         if extracted_dob != dob:
-#             raise HTTPException(status_code=400, detail="DOB does not match ID number")
-
-#         # 5. Optional: Face comparison
-#         if selfie_data:
-#             match = compare_faces(img_data, selfie_data)
-#             if not match:
-#                 raise HTTPException(status_code=400, detail="Face does not match ID")
-
-#         return {"message": "ID verified"}
-
-#     except Exception as e:
-#         print("Error occurred:", str(e))
-#         traceback.print_exc()
-#         raise HTTPException(status_code=500, detail="Internal Server Error")
-
-
-
-
-
-
-
-# # Convert Arabic digits to Western
-# def arabic_to_western_digits(text):
-#     arabic_digits = '٠١٢٣٤٥٦٧٨٩'
-#     western_digits = '0123456789'
-#     txt= text.translate(str.maketrans(arabic_digits, western_digits))
-#     print("txt",txt)
-#     return txt
-
-# # OCR from image
-# def extract_text_from_image(image_data):
-#     img = Image.open(BytesIO(image_data)).convert("RGB")
-#     result = reader.readtext(np.array(img), detail=0, paragraph=True)
-#     text = " ".join(result)
-#     print("OCR text:", text)
-#     return arabic_to_western_digits(text)
-# # def extract_text_from_image(image_data):
-# #     img = Image.open(BytesIO(image_data))
-# #     text = pytesseract.image_to_string(img, lang='ara')
-# #     print("text",text)
-# #     return arabic_to_western_digits(text)
-
-
-# # Extract DOB from national ID
-# def extract_dob_from_national_id(nid):
-#     if len(nid) != 14:
-#         return None
-#     century = '19' if nid[0] == '2' else '20'
-#     return f"{century}{nid[1:3]}-{nid[3:5]}-{nid[5:7]}"
-
-# # Simple face comparison
-# # def compare_faces(img1_data, img2_data):
-# #     try:
-# #         img1 = face_recognition.load_image_file(BytesIO(img1_data))
-# #         img2 = face_recognition.load_image_file(BytesIO(img2_data))
-# #         enc1 = face_recognition.face_encodings(img1)
-# #         enc2 = face_recognition.face_encodings(img2)
-# #         if not enc1 or not enc2:
-# #             return False
-# #         return face_recognition.compare_faces([enc1[0]], enc2[0])[0]
-# #     except:
-# #         return False
-
-# def compare_faces(img1_data, img2_data):
-#     try:
-#         with tempfile.NamedTemporaryFile(suffix=".jpg") as f1, tempfile.NamedTemporaryFile(suffix=".jpg") as f2:
-#             f1.write(img1_data)
-#             f1.flush()
-#             f2.write(img2_data)
-#             f2.flush()
-#             result = DeepFace.verify(f1.name, f2.name, enforce_detection=False)
-#             print("DeepFace result:", result)
-#             return result["verified"]
-#     except Exception as e:
-#         print("DeepFace error:", e)
-#         return False
-
-# import traceback
-
-# @app.post("/verify-id/")
-# async def verify_id(
-#     national_id: str = Form(...),
-#     dob: str = Form(...),
-#     national_id_img: UploadFile = File(...),
-#     selfie_img: UploadFile = File(None)
-# ):
-#     try:
-#         img_data = await national_id_img.read()
-#         selfie_data = await selfie_img.read() if selfie_img else None
-
-#          # Extract and verify ID from image
-#         extracted_text = extract_text_from_image(img_data)
-#         if national_id not in extracted_text:
-#             raise HTTPException(status_code=400, detail="ID not found in image")
-
-#         # Validate DOB from national ID
-#         extracted_dob = extract_dob_from_national_id(national_id)
-#         if extracted_dob != dob:
-#             raise HTTPException(status_code=400, detail="DOB does not match ID")
-
-#         # Face match if selfie provided
-#         if selfie_data:
-#             match = compare_faces(img_data, selfie_data)
-#             if not match:
-#                 raise HTTPException(status_code=400, detail="Face mismatch")
-
-#         return {"message": "ID verified"}
-
-#     except Exception as e:
-#         print("Error occurred:", str(e))
-#         traceback.print_exc()
-#         raise HTTPException(status_code=500, detail="Internal Server Error")
-
-
-
-
-
-
-
-
-
-
-
-
-# # OCR to extract national_id from image
-# def extract_text_from_image(image_data):
-#     img = Image.open(BytesIO(image_data))
-#     text = pytesseract.image_to_string(img)
-#     return text.strip()
-
-# # Validate National ID format (basic example)
-# def is_valid_national_id(national_id):
-#     # Your logic to validate the format (e.g., regex check for length and number structure)
-#     return len(national_id) == 14 and national_id.isdigit()
-
-# # Extract DOB from national ID (assuming the ID contains the DOB in a known format)
-# def extract_dob_from_national_id(national_id):
-#     # Example: Extracting from a specific index in a national_id string (e.g., ddmmyy)
-#     # Adjust based on the format of your national ID
-#     dob = national_id[1:7]
-#     return dob
-
-# # Compare face in national_id_img with selfie
-# def compare_faces(national_id_image_data, selfie_image_data):
-#     # Use MTCNN for face detection and face_recognition for comparison
-#     detector = MTCNN()
-#     national_id_image = cv2.imdecode(np.frombuffer(national_id_image_data, np.uint8), cv2.IMREAD_COLOR)
-#     selfie_image = cv2.imdecode(np.frombuffer(selfie_image_data, np.uint8), cv2.IMREAD_COLOR)
-
-#     # Detect faces in the national ID and selfie images
-#     national_id_faces = detector.detect_faces(national_id_image)
-#     selfie_faces = detector.detect_faces(selfie_image)
-
-#     if not national_id_faces or not selfie_faces:
-#         return False  # No faces detected
-
-#     # Extract the first face found in both images
-#     national_id_face_encoding = face_recognition.face_encodings(national_id_image, [national_id_faces[0]['box']])[0]
-#     selfie_face_encoding = face_recognition.face_encodings(selfie_image, [selfie_faces[0]['box']])[0]
-
-#     # Compare faces
-#     results = face_recognition.compare_faces([national_id_face_encoding], selfie_face_encoding)
-#     return results[0]
-
-# # FastAPI endpoint to handle National ID verification
-# @app.post("/verify_id/")
-# async def verify_national_id(national_id: str, national_id_img: UploadFile = File(...), dob: str = Form(...), selfie_img: UploadFile = File(None)):
-#     national_id_img_data = await national_id_img.read()
-#     selfie_img_data = await selfie_img.read() if selfie_img else None
-
-#     # Step 1: Check if national_id format is valid
-#     if not is_valid_national_id(national_id):
-#         raise HTTPException(status_code=400, detail="Invalid National ID format")
-
-#     # Step 2: Extract text from national_id_img using OCR
-#     extracted_text = extract_text_from_image(national_id_img_data)
-#     if national_id not in extracted_text:
-#         raise HTTPException(status_code=400, detail="National ID does not match OCR output")
-
-#     # Step 3: Compare DOB from national ID with provided dob
-#     extracted_dob = extract_dob_from_national_id(extracted_text)
-#     if extracted_dob != dob:
-#         raise HTTPException(status_code=400, detail="DOB mismatch")
-
-#     # Step 4: Optional: Perform face match if selfie is provided
-#     if selfie_img_data:
-#         faces_match = compare_faces(national_id_img_data, selfie_img_data)
-#         if not faces_match:
-#             raise HTTPException(status_code=400, detail="Face match failed")
-
-#     return {"message": "National ID verified successfully"}
-
-
-
-
-
-
-
-
-
-
-
-#matnse4 split to 2 different files + add test cases file for each 
