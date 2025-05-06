@@ -99,7 +99,7 @@ def extract_text_from_pdf_cloud(public_id: str):
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
         
         text = "\n".join([page.get_text("text") for page in doc])
-        print ("text",text)
+        # print ("text",text)
         doc.close()
 
         return text.strip() if text else "No text found in PDF."
@@ -132,7 +132,8 @@ async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: in
             raise HTTPException(status_code=400, detail="Page number must be 1 or higher")
 
         user_data = users_collection.find_one({"user_id": user_id})
-        page_count= jobs_collection.count_documents({})        # page_count = page_size + 1
+        page_count = jobs_collection.count_documents({"status": "1"})
+        # page_count= jobs_collection.count_documents({})        # page_count = page_size + 1
         print("page_count",page_count)
         if page_count == 0:
             raise HTTPException(status_code=404, detail="No jobs found")
@@ -152,7 +153,7 @@ async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: in
             else:
                 print("CV updated, generating new embedding")
                 extracted_text = extract_text_from_pdf_cloud(cv_url)
-                print ("extracted_text",extracted_text)
+                # print ("extracted_text",extracted_text)
                 query_vector = get_embedding(extracted_text)
                 users_collection.update_one(
                     {"user_id": user_id},
@@ -318,7 +319,7 @@ async def update_job(job_id: int, job: Job):
             result = jobs_collection.insert_one(updated_job)
             return {"message": "Job created successfully", "id": str(result.inserted_id)}
     result = jobs_collection.update_one({"id": job_id}, {"$set": updated_job})
-    print (result)
+    # print (result)
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found in mongodb")
 
@@ -641,7 +642,7 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
         print(f"An error occurred during RAG query with history: {e}")
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
-####### resume parse ##########
+################### resume parse #######################
 import json
 from typing import List, Optional
 from pydantic import BaseModel
@@ -666,11 +667,19 @@ class CVData(BaseModel):
     experience: List[ExperienceItem]
 
 
-
-
-
+def get_embedd_cv_extract(cv, user_id,cv_url):
+    print("embedd dats ",cv, user_id,cv_url)
+    embed= get_embedding(cv)
+    users_collection.update_one(
+         {"user_id": user_id},
+         {"$set": {"embedding": embed, "cv_url": cv_url}}  
+    )
+    
+    
+    
 @app.get("/extract-cv-data/")
-async def extract_cv_data(cv_url: str):
+async def extract_cv_data(cv_url: str , user_id: int ,background_tasks: BackgroundTasks): # 
+    print ("cv_url",cv_url,"user_id",user_id)
     try:
         public_id = cv_url.split("/")[-1].replace(".pdf", "")
         text = extract_text_from_pdf_cloud(public_id)
@@ -691,7 +700,7 @@ Return only valid JSON, no markdown or explanation.
 CV Text:
 {text[:3000]}
 """
-  
+        print ("before chatgpt api ")  
         start_time = time.time()
         openai.api_key = os.getenv('OPEN_AI')
         response = openai.chat.completions.create(
@@ -702,9 +711,9 @@ CV Text:
         )
         duration = round(time.time() - start_time, 2)
         print(f"✅ OpenAI API call succeeded in {duration} seconds")
-
+ 
         result = response.choices[0].message.content.strip()
-        print("🧠 Raw OpenAI Response:\n", result)
+        # print("🧠 Raw OpenAI Response:\n", result)
 
         # Parse JSON from response
         json_start = result.find('{')
@@ -746,7 +755,7 @@ CV Text:
                 }]        
                 # } for exp in parsed["Experience"]]
                 break
-        
+        background_tasks.add_task(get_embedd_cv_extract,text,user_id,public_id)
         return parsed
 
     except Exception as e:
