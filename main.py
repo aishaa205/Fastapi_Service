@@ -2,8 +2,8 @@ import sys
 sys.path.append("..") 
 from sentence_transformers import SentenceTransformer , util
 from fastapi import FastAPI , HTTPException ,Query, UploadFile, File, Form , Header, Depends
-from database import jobs_collection ,users_collection, rag_collection, rag_names_collection
-from pydantic import BaseModel,validator,field_validator
+from database import jobs_collection ,users_collection, rag_collection, rag_names_collection, get_user_table, async_session
+from pydantic import BaseModel,validator,field_validator, Field
 import torch
 # from sklearn.feature_extraction.text import TfidfVectorizer
 # from sklearn.metrics.pairwise import cosine_similarity
@@ -37,11 +37,11 @@ import requests
 # import easyocr
 from contextlib import asynccontextmanager
 load_dotenv()
-
-
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import update
 # from some_fraud_detection_lib import is_fake_id
 # from some_id_front_detector import is_front_side
-
+background_tasks = BackgroundTasks()
 
 
 
@@ -117,57 +117,68 @@ def get_embedding(text):
     
 def format_cv_url(cv_url):
     if cv_url.startswith("http"):
-        return cv_url.split("/")[-1]
+        return cv_url.split("/")[-1].replace(".pdf", "")
     return cv_url
 
+def update_user(embedding, user_id, cv_url):
+    users_collection.update_one(
+                    {"user_id": user_id},
+                    {"$set": {"embedding": embedding, "cv_url": cv_url}},
+                    upsert=True
+                )
+def check_user_cv(user_id, cv_url):
+    user_data = users_collection.find_one({"user_id": user_id})
+    if not user_data:
+        embedding = get_embedding(extracted_text)
+        background_tasks.add_task(update_user, embedding, user_id, cv_url)
+        return embedding
+    if user_data and user_data.get("cv_url") == cv_url:
+        print("Using stored embedding (CV unchanged)")
+        return user_data["embedding"]
+    else:
+        print("CV updated, generating new embedding")
+        extracted_text = extract_text_from_pdf_cloud(cv_url)
+        print(f"Extracted text length: {len(extracted_text)}")
+        embedding = get_embedding(extracted_text)
+        background_tasks.add_task(update_user, embedding, user_id, cv_url)
+        return embedding
+
+@app.get('/user_embedding/')
+async def get_user_embedding(user_id: int, cv_url: str):
+    embedding = check_user_cv(user_id, cv_url)
+    return {"embedding": embedding}
 
 @app.get("/recom/")
 async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: int = 10):
     try:
-        print("user_id",user_id)
+        
+        if not cv_url:
+            raise HTTPException(status_code=400, detail="CV URL is required")
+        if not user_id:
+            raise HTTPException(status_code=400, detail="User ID is required")
+
         cv_url = format_cv_url(cv_url)
-        print("cv_url",cv_url)
-        print("page",page)
         if page < 1:
             raise HTTPException(status_code=400, detail="Page number must be 1 or higher")
 
-        user_data = users_collection.find_one({"user_id": user_id})
         page_count = jobs_collection.count_documents({"status": "1"})
-        # page_count= jobs_collection.count_documents({})        # page_count = page_size + 1
-        print("page_count",page_count)
+        
         if page_count == 0:
             raise HTTPException(status_code=404, detail="No jobs found")
         if page*page_size > 100:
             raise HTTPException(status_code=400, detail="Max recommendations is 100")
         if page > page_count/page_size and page > 1:
             raise HTTPException(status_code=400, detail="Page number exceeds available pages")
-        if not cv_url:
-            raise HTTPException(status_code=400, detail="CV URL is required")
-        if not user_id:
-            raise HTTPException(status_code=400, detail="User ID is required")
-        if user_data:
-            stored_cv_url = user_data.get("cv_url")
-            if stored_cv_url == cv_url:
-                print("Using stored embedding (CV unchanged)")
-                query_vector = user_data["embedding"]
-            else:
-                print("CV updated, generating new embedding")
-                extracted_text = extract_text_from_pdf_cloud(cv_url)
-                # print ("extracted_text",extracted_text)
-                query_vector = get_embedding(extracted_text)
-                users_collection.update_one(
-                    {"user_id": user_id},
-                    {"$set": {"embedding": query_vector, "cv_url": cv_url}}  
-                )
-        else:
-            print("New user, extracting CV text")
-            extracted_text = extract_text_from_pdf_cloud(cv_url)
-            query_vector = get_embedding(extracted_text)
-            users_collection.insert_one(
-                {"user_id": user_id, "embedding": query_vector, "cv_url": cv_url} 
-            )
+        
+        query_vector = check_user_cv(user_id, cv_url)
+
         skip = (page - 1) * page_size
         pipeline = [
+            {
+                "$match": {
+                    "status": "1",
+                }
+            },
             {
                 "$vectorSearch": {
                     "index": "vector",
@@ -178,11 +189,6 @@ async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: in
                     "metric": "cosine"
                 }
                 
-            },
-            {
-                "$match": {
-                    "status": "1",
-                }
             },
             {
                 "$project": {
@@ -214,6 +220,8 @@ async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: in
         print(e)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+##########################CRUD##########################
 class Job(BaseModel):
     id: int
     title: str
@@ -222,9 +230,12 @@ class Job(BaseModel):
     experince: str
     status: str
     type_of_job: str
+    attend: str
+    specialization: str
     company: int
     company_name: str
     company_logo: Optional[str] = None
+    created_at: datetime = Field(default_factory=datetime.utcnow)
     {'id': 31, 'title': 'Backend Engineer', 'description': 'Django and FastAPI experience required', 'location': 'Remote', 'status': 'open'
      , 'type_of_job': 'Full-time', 'experince': 'Mid-level', 'company': 8, 'company_name': 'Aisha Amr', 'company_logo': None}
     
@@ -256,6 +267,8 @@ class Job(BaseModel):
         return value
 def recommend_emails(job):
     try:
+        job_data["combined_embedding"] = get_embedding(job_data["description"] + " " + " ".join(job_data["title"]))
+        inserted_job = jobs_collection.insert_one(job_data)
         results = list(users_collection.aggregate([
             {"$match": {"cv_url": {"$exists": True}}},
             {
@@ -281,13 +294,8 @@ def recommend_emails(job):
 @app.post("/jobs")
 async def create_job(job: Job, request: Request, background_tasks: BackgroundTasks):
     job_data = job.dict()
-    job_data["combined_embedding"] = get_embedding(job_data["description"] + " " + " ".join(job_data["title"]))
-    inserted_job = jobs_collection.insert_one(job_data)
     background_tasks.add_task(recommend_emails, job_data)
-    return {"id": str(inserted_job.inserted_id),
-            "message": "Job created successfully",
-            #"mongodb_id": str(inserted_job.inserted_id)
-            }
+    return {"message": "Job created successfully"}
 
 
 # Commentb l7d m ashof ha7tagha wala la2
@@ -311,15 +319,13 @@ async def create_job(job: Job, request: Request, background_tasks: BackgroundTas
 @app.put("/jobs/{job_id}")
 async def update_job(job_id: int, job: Job):
     updated_job = job.dict()
-    updated_job["combined_embedding"] = get_embedding(updated_job["description"] + " " + " ".join(updated_job["title"]))
-    print(job_id)
-    existing_job = jobs_collection.find_one({"id": job_id})
-    print(existing_job)
-    if not existing_job:
-            result = jobs_collection.insert_one(updated_job)
-            return {"message": "Job created successfully", "id": str(result.inserted_id)}
-    result = jobs_collection.update_one({"id": job_id}, {"$set": updated_job})
-    # print (result)
+    old_job = jobs_collection.find_one({"id": job_id})
+    
+    if old_job and old_job['description'] != updated_job["description"]:
+        updated_job["combined_embedding"] = get_embedding(updated_job["description"] + " " + " ".join(updated_job["title"]))
+    
+    result = jobs_collection.update_one({"id": job_id}, {"$set": updated_job}, upsert=True)
+
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found in mongodb")
 
@@ -339,14 +345,13 @@ async def delete_job(job_id: int):
         raise HTTPException(status_code=404, detail="Job not found in mongodb")
     return {"message": "Job deleted successfully"}
 
+##########################CRUD##########################
 
 class ATSRequest(BaseModel):
     cv_url: str
     job_id: int
+    application_id: Optional[int]
 
-def get_embedding_ats(text):
-    with torch.no_grad():
-        return model_1.encode(text, convert_to_tensor=True).tolist()
 
 def preprocess_text(text):
     text = re.sub(r'\W+', ' ', text)  # Remove special characters
@@ -354,26 +359,21 @@ def preprocess_text(text):
     return text.lower()
 
 
-def calculate_embedding_similarity(cv_text, job_text):
-    cv_embedding = model_1.encode(cv_text, convert_to_tensor=True)
-    job_embedding = model_1.encode(job_text, convert_to_tensor=True)
+def calculate_embedding_similarity(cv_embedding, job_embedding):
     similarity_score = util.pytorch_cos_sim(cv_embedding, job_embedding).item()
-    return similarity_score * 100  
+    return similarity_score
 
 
-@app.post("/ats/{user_id}/{job_id}/")
-async def ats_system(user_id: int , job_id: int, request: ATSRequest):
+@app.post("/ats/{user_id}/{job_id}")
+async def ats_system(user_id: int , job_id: int, request: ATSRequest, db: AsyncSession = Depends(lambda: async_session())):
     
-    print(f"Received request for user_id={user_id}, job_id={job_id}")
+    print(f"Received ATS request for user_id={user_id}, job_id={job_id}")
+    cv_url = request.cv_url
 
-    try:
-        job_object_id = job_id
-    except Exception as e:
-        print(f"Invalid job_id: {job_id} - Error: {e}")
-        raise HTTPException(status_code=400, detail="Invalid job ID")
+    
+    application_id = request.application_id
 
-
-    job = jobs_collection.find_one({"id": job_object_id})
+    job = jobs_collection.find_one({"id": job_id})
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     job_embedding = job.get("combined_embedding", None)
@@ -385,92 +385,32 @@ async def ats_system(user_id: int , job_id: int, request: ATSRequest):
     cv_url = format_cv_url(request.cv_url)
     print(f"cv_url={cv_url}")
 
-    
-    user_data = users_collection.find_one({"user_id": user_id})
-
-    if user_data and user_data.get("cv_url") == cv_url:
-        print("Using stored embedding (CV unchanged)")
-        cv_embedding = user_data["embedding"]
-    else:
-        try:
-            extracted_text = extract_text_from_pdf_cloud(cv_url)
-            print(f"Extracted text length: {len(extracted_text)}")
-        except Exception as e:
-            print(f"Error extracting text: {e}")
-            raise HTTPException(status_code=500, detail="CV extraction failed")
-
-        try:
-            cv_embedding = get_embedding(extracted_text)
-            print(f"Generated embedding length: {len(cv_embedding)}")
-        except Exception as e:
-            print(f"Error generating embedding: {e}")
-            raise HTTPException(status_code=500, detail="Embedding generation failed")
-
-        users_collection.update_one(
-            {"user_id": user_id},
-            {"$set": {"embedding": cv_embedding, "cv_url": cv_url}},
-            upsert=True
-        )
-
+    cv_embedding = check_user_cv(user_id, cv_url)
     
     if not cv_embedding or not job_embedding:
         raise HTTPException(status_code=500, detail="Embedding computation failed")
     
     try:
-        similarity_score = util.pytorch_cos_sim(
-            torch.tensor(cv_embedding), torch.tensor(job_embedding)
-        ).item()
+        similarity_score = calculate_embedding_similarity(cv_embedding, job_embedding)
     except Exception as e:
         print(f"Error computing similarity: {e}")
         raise HTTPException(status_code=500, detail="Similarity computation failed")
+    application_table = await get_user_table("applications_application")
+    result = round(similarity_score * 100, 2)
+    query = (
+        update(application_table)
+        .where(application_table.c.id == application_id)
+        .values(ats_res=result)
+        .execution_options(synchronize_session="fetch")
+    )
+    await db.execute(query)
+    await db.commit()
+    return {"status": "updated"}
+    # return {"match_percentage": round(similarity_score * 100, 2), "message": "Higher score means a better match!"}
 
-    return {"match_percentage": round(similarity_score * 100, 2), "message": "Higher score means a better match!"}
 
-# @app.delete("/rag")
-# async def delete_rag(name: str, id: str):
-#     if id:
-#         existing_rag = rag_names_collection.find_one({"_id": id})
-#     elif name:
-#         existing_rag = rag_names_collection.find_one({"name": name})
-#     else:
-#         raise HTTPException(status_code=400, detail="Please provide either id or name")
-    
-#     if not existing_rag:
-#         raise HTTPException(status_code=404, detail="Rag not found")
-    
-#     result = rag_names_collection.delete_one({"name": name})
-    
-#     if result.deleted_count == 0:
-#         raise HTTPException(status_code=404, detail="Rag not found in mongodb")
-#     if not name:
-#         name = existing_rag["name"]
-#     result_embed = rag_collection.delete_many({"metadata": name})
-    
-#     if result_embed.deleted_count == 0:
-#         raise HTTPException(status_code=404, detail="No embedded documents found for the given RAG")
-    
-#     return {"message": "Rag and its embedded documents deleted successfully"}
-
-# @app.delete("/allrag")
-# async def delete_all_rags():
-#     result = rag_names_collection.delete_many({})
-    
-#     # if result.deleted_count == 0:
-#     #     raise HTTPException(status_code=404, detail="No Rags found")
-    
-#     result_embed = rag_collection.delete_many({})
-
-#     # if result_embed.deleted_count == 0:
-#     #     raise HTTPException(status_code=404, detail="No embedded documents found for the given RAG")
-    
-#     return {"message": "All Rags and their embedded documents deleted successfully"}
-    
 @app.post("/rag")
 async def rag_system(pdf: UploadFile = File(...)):
-    # rag_name = rag_names_collection.find_one({"name": pdf.filename.replace(".pdf", "")})
-    # if rag_name:
-    #     raise HTTPException(status_code=400, detail=f"Pdf with this name already uploaded on {rag_name['created_at']} GMT")
-    # else:
     # Create the temp directory if it doesn't exist
     os.makedirs("./temp", exist_ok=True)
     rag_names_collection.insert_one({"name": pdf.filename.replace(".pdf", ""), "created_at": datetime.utcnow()})
@@ -678,85 +618,86 @@ def get_embedd_cv_extract(cv, user_id,cv_url):
     
     
 @app.get("/extract-cv-data/")
-async def extract_cv_data(cv_url: str , user_id: int ,background_tasks: BackgroundTasks): # 
-    print ("cv_url",cv_url,"user_id",user_id)
+async def extract_cv_data(cv_url: str , user_id: int ,background_tasks: BackgroundTasks, update: bool = True ):
     try:
-        public_id = cv_url.split("/")[-1].replace(".pdf", "")
+        public_id = format_cv_url(cv_url)
         text = extract_text_from_pdf_cloud(public_id)
-        print("Extracted text:", text)
-        print("public_id:",public_id)
 
-        prompt = f"""
-You are an intelligent CV parser. From the following resume text, return a valid JSON object with the following keys:
-
-1. "Summary": Generate a professional 5–7 midium length sentence summary based on the full CV content. This must be an original synthesis, not copied from the CV. Clearly identify the candidate's job specialization or target role based on their skills and experience (e.g., "Machine Learning Engineer" or "Full-Stack Developer"). Also include a brief summary of the types of projects they have worked on, highlighting key technologies or outcomes.
-2. "About": Extract the **first personal paragraph or section** that appears after the contact information (name, email, phone, location). This is typically an unlabeled personal introduction, profile, or "About Me" paragraph.
-3. "Skills": A list of technical and soft skills.
-4. "Education": A list of objects with: degree, school, startDate, endDate, fieldOfStudy.
-5. "Experience": A list of objects with: title, company, startDate, endDate.
-
-Return only valid JSON, no markdown or explanation.
-
-CV Text:
-{text[:3000]}
-"""
-        print ("before chatgpt api ")  
-        start_time = time.time()
-        openai.api_key = os.getenv('OPEN_AI')
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            max_tokens=1000
-        )
-        duration = round(time.time() - start_time, 2)
-        print(f"✅ OpenAI API call succeeded in {duration} seconds")
- 
-        result = response.choices[0].message.content.strip()
-        # print("🧠 Raw OpenAI Response:\n", result)
-
-        # Parse JSON from response
-        json_start = result.find('{')
-        json_str = result[json_start:].split("```")[0]
-        parsed = json.loads(json_str)
-        print("🧠 Parsed OpenAI Response:\n", parsed)
+        if not text:
+            raise HTTPException(status_code=400, detail="No text found in PDF.")
         
-        # Normalize missing fields
-        parsed.setdefault("About", "")
-        parsed.setdefault("Summary", "")
-        parsed.setdefault("Skills", [])
-        parsed.setdefault("Education", [])
-        parsed.setdefault("Experience", [])
+        if update:
+            prompt = f"""
+                    You are an intelligent CV parser. From the following resume text, return a valid JSON object with the following keys:
 
-        # Normalize skills list
-        parsed["Skills"] = [s.strip() for s in parsed["Skills"] if isinstance(s, str)]
+                    1. "Summary": Generate a professional 5–7 midium length sentence summary based on the full CV content. This must be an original synthesis, not copied from the CV. Clearly identify the candidate's job specialization or target role based on their skills and experience (e.g., "Machine Learning Engineer" or "Full-Stack Developer"). Also include a brief summary of the types of projects they have worked on, highlighting key technologies or outcomes.
+                    2. "About": Extract the **first personal paragraph or section** that appears after the contact information (name, email, phone, location). This is typically an unlabeled personal introduction, profile, or "About Me" paragraph.
+                    3. "Skills": A list of technical and soft skills.
+                    4. "Education": A list of objects with: degree, school, startDate, endDate, fieldOfStudy.
+                    5. "Experience": A list of objects with: title, company, startDate, endDate.
 
-        # Ensure Education and Experience entries have required keys
-        for edu in parsed["Education"]:
-            edu.setdefault("degree", "")
-            edu.setdefault("school", "")
-            edu.setdefault("startDate", "")
-            edu.setdefault("endDate", "")
-            edu.setdefault("fieldOfStudy", "")
-        
-        for exp in parsed["Experience"]:
-            if isinstance(exp, dict):
-                exp.setdefault("title", "")
-                exp.setdefault("company", "")
-                exp.setdefault("startDate", "")
-                exp.setdefault("endDate", "")
-            else:
-                # fallback in case it is just a string
-                parsed["Experience"] = [{
-                    "title": exp,
-                    "company": "",
-                    "startDate": "",
-                    "endDate": ""
-                }]        
-                # } for exp in parsed["Experience"]]
-                break
+                    Return only valid JSON, no markdown or explanation.
+
+                    CV Text:
+                    {text[:3000]}
+                    """
+
+            start_time = time.time()
+            openai.api_key = os.getenv('OPEN_AI')
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+                max_tokens=1000
+            )
+            duration = round(time.time() - start_time, 2)
+            print(f"✅ OpenAI API call succeeded in {duration} seconds")
+    
+            result = response.choices[0].message.content.strip()
+            # print("🧠 Raw OpenAI Response:\n", result)
+
+            # Parse JSON from response
+            json_start = result.find('{')
+            json_str = result[json_start:].split("```")[0]
+            parsed = json.loads(json_str)
+            print("🧠 Parsed OpenAI Response:\n", parsed)
+            
+            # Normalize missing fields
+            parsed.setdefault("About", "")
+            parsed.setdefault("Summary", "")
+            parsed.setdefault("Skills", [])
+            parsed.setdefault("Education", [])
+            parsed.setdefault("Experience", [])
+
+            # Normalize skills list
+            parsed["Skills"] = [s.strip() for s in parsed["Skills"] if isinstance(s, str)]
+
+            # Ensure Education and Experience entries have required keys
+            for edu in parsed["Education"]:
+                edu.setdefault("degree", "")
+                edu.setdefault("school", "")
+                edu.setdefault("startDate", "")
+                edu.setdefault("endDate", "")
+                edu.setdefault("fieldOfStudy", "")
+            
+            for exp in parsed["Experience"]:
+                if isinstance(exp, dict):
+                    exp.setdefault("title", "")
+                    exp.setdefault("company", "")
+                    exp.setdefault("startDate", "")
+                    exp.setdefault("endDate", "")
+                else:
+                    # fallback in case it is just a string
+                    parsed["Experience"] = [{
+                        "title": exp,
+                        "company": "",
+                        "startDate": "",
+                        "endDate": ""
+                    }]        
+                    # } for exp in parsed["Experience"]]
+                    break
         background_tasks.add_task(get_embedd_cv_extract,text,user_id,public_id)
-        return parsed
+        return parsed if parsed else {}
 
     except Exception as e:
         print("❌ GPT API failed:", e)
@@ -768,7 +709,7 @@ CV Text:
 
 
 @app.get("/top_talents")
-async def top_talents(job_id: int, page: int = 1, page_size: int = 5):
+async def top_talents(job_id: int, page: int = 1, page_size: int = 5, seniority: str = None):
     try:
         if not job_id:
             raise HTTPException(status_code=400, detail="Job ID is required")
@@ -793,7 +734,7 @@ async def top_talents(job_id: int, page: int = 1, page_size: int = 5):
 
         # Get top talents
         skip = (page - 1) * page_size
-        results = list(users_collection.aggregate([
+        vector_search = [
             {
                 "$vectorSearch": {
                     "index": "default",
@@ -815,7 +756,12 @@ async def top_talents(job_id: int, page: int = 1, page_size: int = 5):
             },
             {"$skip": skip},  # Skip previous pages
             {"$limit": page_size}  #  Limit results per page
-        ]))
+        ]
+
+        if seniority:
+            vector_search.insert(0, {"$match": {"seniority": seniority}})
+
+        results = list(users_collection.aggregate(vector_search))
 
         if not results or len(results) == 0:
             raise HTTPException(status_code=404, detail="No matching talents found")
@@ -826,5 +772,38 @@ async def top_talents(job_id: int, page: int = 1, page_size: int = 5):
         }
     except Exception as e:
         print(f"An error occurred while retrieving the job: {e}")
+        raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+@app.post("/register-user/")
+async def register_user( cv: UploadFile = File(...)):
+    try:
+        # Generate a new user ID (e.g., use a simple auto-increment or UUID)
+        for cv in [cv]:
+            user_id = users_collection.count_documents({}) + 100
+            
+            # Read and process the CV file
+            cv_content = await cv.read()
+            pdf_stream = BytesIO(cv_content)
+            doc = fitz.open(stream=pdf_stream, filetype="pdf")
+            
+            text = "\n".join([page.get_text("text") for page in doc])
+            # print ("text",text)
+            doc.close()
+            extracted_text = text.strip() if text else "No text found in PDF."
+            cv_embedding = get_embedding(extracted_text)
+
+            # Insert the new user into the database
+            users_collection.insert_one({
+                "user_id": user_id,
+                "name": cv.filename.replace(".pdf", ""),
+                "email": cv.filename.replace(".pdf", "").replace(" ", "_") + "@gmail.com",
+                "embedding": cv_embedding
+            })
+            print("added name", cv.filename.replace(".pdf", ""))
+        
+        return {"message": "User registered successfully"}
+    
+    except Exception as e:
+        print(f"An error occurred while registering the user: {e}")
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
 
