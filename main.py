@@ -1,7 +1,7 @@
 import sys
 sys.path.append("..") 
 from sentence_transformers import SentenceTransformer , util
-from fastapi import FastAPI , HTTPException ,Query, UploadFile, File, Form , Header, Depends
+from fastapi import FastAPI, HTTPException, UploadFile, File, Form , Depends
 from database import jobs_collection ,users_collection, rag_collection, rag_names_collection, get_user_table, async_session
 from pydantic import BaseModel,validator,field_validator, Field
 import torch
@@ -69,13 +69,15 @@ security = HTTPBearer()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
-    global model, ats_model
+    global model
     # Load main recommendation model
-    model = SentenceTransformer("paraphrase-MiniLM-L6-v2", device="cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model = SentenceTransformer("paraphrase-MiniLM-L6-v2", device='cpu')
     logger.info("Recommendation model loaded.")
+    print('Device: ',device)
     # Load ATS model
     # ats_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
-    logger.info("ATS model loaded.")
+    # logger.info("ATS model loaded.")
     yield
     # Shutdown logic (if any)
     logger.info("Shutting down FastAPI application.")
@@ -500,7 +502,7 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
                     "queryVector": query_embedding,
                     "path": "embedding",
                     "numCandidates": 1000,
-                    "limit": 10,
+                    "limit": 2,
                     "metric": "cosine"
                 }
             },
@@ -528,22 +530,22 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
 
 
         # 4. Prepare messages for OpenAI, including history and context
-        messages = [
-            {
-                "role": "system",
-                "content": (
-                    "Dont metion anything about being looking at a provided context. "
-                    "You are a helpful assistant that answers questions based on the provided context. "
-                    "You can use external knowledge if needed but with a focus on the provided context. "
-                    # "Use the chat history to understand the conversation flow and user intent. "
-                    # "If the answer cannot be found in the *provided context* and the history doesn't provide enough information, respond with 'I am sorry, but the information needed to answer this question is not available in the provided document or previous conversation context.' "
-                    # "Do not use external knowledge. Keep the answer concise and directly address the user's question."
-                )
-            }
-        ]
+        messages = []
+        # messages.append({
+        #     "role": "system",
+        #     "content": (
+        #         "Dont metion anything about being looking at a provided context. "
+        #         "You are a helpful assistant that answers questions based on the provided context. "
+        #         "You can use external knowledge if needed but with a focus on the provided context. "
+        #         # "Use the chat history to understand the conversation flow and user intent. "
+        #         # "If the answer cannot be found in the *provided context* and the history doesn't provide enough information, respond with 'I am sorry, but the information needed to answer this question is not available in the provided document or previous conversation context.' "
+        #         # "Do not use external knowledge. Keep the answer concise and directly address the user's question."
+        #     )
+        # })
+        
 
         # Add previous chat history to the messages list
-        messages.extend(chat_history)
+        # messages.extend(chat_history)
 
         # Add the current user query, incorporating the retrieved context
         current_user_message_content = f"Context:\n{context}\n\nQuestion: {query_text}"
@@ -558,22 +560,35 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
 
         # 5. Call OpenAI API
         start_time_openai = time.time()
-        openai.api_key = os.getenv('OPEN_AI')
-        response = openai.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=messages,
-            temperature=0.1,
-            max_tokens = 384
+        # openai.api_key = os.getenv('OPEN_AI')
+        # response = openai.chat.completions.create(
+        #     model="gpt-3.5-turbo",
+        #     messages=messages,
+        #     temperature=0.1,
+        #     max_tokens = 384
+        # )
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            headers={
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "qwen3:0.6b",
+                "prompt": "\n".join([f"{msg['role']}: {msg['content']}" for msg in messages]),
+                "stream": False
+            }
         )
         time_taken_openai = round(time.time() - start_time_openai, 2)
         print(f"Time taken for OpenAI API call: {time_taken_openai} seconds")
 
         # 6. Extract the answer
-        answer = response.choices[0].message.content.strip()
+        response_data = response.json()
+        # print("Response:", response_data)
+        answer = response_data.get('response', '').strip()
         print("Answer:", answer)
         # 7. Return the answer
         # The client is responsible for adding the current query and this answer to its history
-        return {"answer": answer}
+        return {"answer": re.sub(r'\*\*(.*?)\*\*', r'\1', answer) + '\n\n' + f"Time taken for LLM call: {time_taken_openai} seconds."}
 
     except HTTPException as e:
         # Re-raise HTTPExceptions
@@ -652,6 +667,21 @@ async def extract_cv_data(cv_url: str , user_id: int ,background_tasks: Backgrou
             )
             duration = round(time.time() - start_time, 2)
             print(f"✅ OpenAI API call succeeded in {duration} seconds")
+            start_time = time.time()
+            response1 = requests.post(
+            "http://localhost:11434/api/generate",
+            headers={
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "qwen3:0.6b",
+                "prompt": prompt,
+                "stream": False
+            }
+            )
+            time_taken_openai = round(time.time() - start_time, 2)
+            print(f"Time taken for Localhost API call: {time_taken_openai} seconds")
+            print("🧠 Localhost Response:\n", response1.json())
     
             result = response.choices[0].message.content.strip()
             # print("🧠 Raw OpenAI Response:\n", result)
