@@ -137,7 +137,7 @@ def check_user_cv(user_id, cv_url):
         return user_data["embedding"]
     else:
         print("CV updated, generating new embedding")
-        extracted_text = extract_text_from_pdf_cloud(cv_url)
+        extracted_text = extract_text_from_pdf_cloud(format_cv_url(cv_url))
         print(f"Extracted text length: {len(extracted_text)}")
         embedding = get_embedding(extracted_text)
         background_tasks.add_task(update_user, embedding, user_id, cv_url)
@@ -228,6 +228,7 @@ class Job(BaseModel):
     description: str
     location: str
     experince: str
+    combined_embedding: Optional[list[float]] = None
     status: str
     type_of_job: str
     attend: str
@@ -236,8 +237,8 @@ class Job(BaseModel):
     company_name: str
     company_logo: Optional[str] = None
     created_at: datetime = Field(default_factory=datetime.utcnow)
-    {'id': 31, 'title': 'Backend Engineer', 'description': 'Django and FastAPI experience required', 'location': 'Remote', 'status': 'open'
-     , 'type_of_job': 'Full-time', 'experince': 'Mid-level', 'company': 8, 'company_name': 'Aisha Amr', 'company_logo': None}
+    # {'id': 31, 'title': 'Backend Engineer', 'description': 'Django and FastAPI experience required', 'location': 'Remote', 'status': 'open'
+    #  , 'type_of_job': 'Full-time', 'experince': 'Mid-level', 'company': 8, 'company_name': 'Aisha Amr', 'company_logo': None}
     
 
     # @validator("title", "description")
@@ -264,13 +265,13 @@ class Job(BaseModel):
     def must_have_id(cls, v: int) -> int:
         if v is None:
             raise ValueError("Must include job ID")
-        return value
+        return v
 def recommend_emails(job):
     try:
-        job_data["combined_embedding"] = get_embedding(job_data["description"] + " " + " ".join(job_data["title"]))
-        inserted_job = jobs_collection.insert_one(job_data)
+        job["combined_embedding"] = get_embedding(job["description"] + " " + " ".join(job["title"]))
+        print(job)
+        inserted_job = jobs_collection.insert_one(job)
         results = list(users_collection.aggregate([
-            {"$match": {"cv_url": {"$exists": True}}},
             {
                 "$vectorSearch": {
                     "index": "default",
@@ -292,8 +293,10 @@ def recommend_emails(job):
 
 # @app.post("/jobs", dependencies=[Depends(verify_token)])
 @app.post("/jobs")
-async def create_job(job: Job, request: Request, background_tasks: BackgroundTasks):
-    job_data = job.dict()
+async def create_job( request: Request, background_tasks: BackgroundTasks):
+    job = await request.json()
+    print(job)
+    job_data = job
     background_tasks.add_task(recommend_emails, job_data)
     return {"message": "Job created successfully"}
 
