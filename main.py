@@ -55,7 +55,7 @@ from tensorflow.keras.preprocessing import image
 from PIL import Image
 from fastapi import FastAPI, APIRouter, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from typing import Annotated
+from typing import Annotated ,List,Optional
 import logging
 import traceback
 from pydub import AudioSegment
@@ -65,9 +65,6 @@ from pydub.silence import detect_nonsilent
 import noisereduce as nr
 import httpx
 from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
-import smtplib
-from email.message import EmailMessage
 import whisper
 import ffmpeg
 import cv2
@@ -75,9 +72,10 @@ import mediapipe as mp
 from collections import Counter
 import re
 from typing import Dict,TypedDict
-
-
+from pydantic import BaseModel
+from torchvision import transforms
 import base64
+import clip
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -85,15 +83,31 @@ logger = logging.getLogger(__name__)
 
 # Initialize models
 # model = SentenceTransformer('all-MiniLM-L6-v2')
-resnet_model = ResNet50(weights='imagenet')
+# resnet_model = ResNet50(weights='imagenet')
 router = APIRouter()
 
+# Initialize CLIP model globally to avoid reloading
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+print ("device",DEVICE)
+CLIP_MODEL, CLIP_PREPROCESS = None, None
 
-# ImageNet classes for attire analysis
-imagenet_classes = [
-    'suit', 'tie', 'shirt', 'business suit', 'bow tie', 'jeans',
-    'sweatshirt', 'T-shirt', 'sweat pants', 'pajamas', 'lab coat'
-]
+def load_clip_model():
+    """Load CLIP model once and cache it"""
+    global CLIP_MODEL, CLIP_PREPROCESS
+    if CLIP_MODEL is None:
+        try:
+            CLIP_MODEL, CLIP_PREPROCESS = clip.load("ViT-B/32", device=DEVICE)
+            print("CLIP model loaded successfully")
+        except Exception as e:
+            print(f"Failed to load CLIP model: {str(e)}")
+            raise
+
+
+# # ImageNet classes for attire analysis
+# imagenet_classes = [
+#     'suit', 'tie', 'shirt', 'business suit', 'bow tie', 'jeans',
+#     'sweatshirt', 'T-shirt', 'sweat pants', 'pajamas', 'lab coat'
+# ]
 
 
 
@@ -917,6 +931,21 @@ class AnswerAnalysisResult(TypedDict):
  
     
 class InterviewAnalyzer:
+    def __init__(self):
+        load_clip_model()  # Ensure CLIP model is loaded
+        self.attire_classes = [
+            "a professional person wearing formal business attire",
+            "a professional person wearing smart casual clothing",
+            "a professional person wearing casual clothing",
+            "a professional person wearing inappropriate interview clothing"
+        ]
+        self.attire_class_weights = {
+            0: 9.0,  # Formal business attire
+            1: 7.0,  # Smart casual
+            2: 4.0,  # Casual
+            3: 2.0   # Inappropriate
+        }
+
     
     def compute_similarity(self, text1, text2):
         embedding1 = model.encode(text1, convert_to_tensor=True)
@@ -938,10 +967,10 @@ class InterviewAnalyzer:
             cap.release()
 
             # Perform analyses
-            # transcript = self.transcribe_video(video_path)
-            # answer_analysis = self.analyze_answer(str(transcript), str(job_description))
-            # pronunciation_score = self.analyze_pronunciation(video_path)
-            # grammar_score = self.analyze_grammar(transcript)
+            transcript = self.transcribe_video(video_path)
+            answer_analysis = self.analyze_answer(str(transcript), str(job_description))
+            pronunciation_score = self.analyze_pronunciation(video_path)
+            grammar_score = self.analyze_grammar(transcript)
             attire_score = self.analyze_attire(video_path)
             print (" analyzed interview transcript",transcript
                    ,"answer_score",answer_analysis['score']
@@ -976,7 +1005,8 @@ class InterviewAnalyzer:
                 "attire_score": round(attire_score, 2),
                 "total_score": round(total_score, 2),
                 "transcript": transcript,
-                "feedback": answer_analysis.get('feedback', '')
+                "feedback": answer_analysis.get('feedback', ''),
+                "attire_feedback": self._get_attire_feedback(attire_score)
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -1109,7 +1139,185 @@ class InterviewAnalyzer:
         except Exception as e:
             print(f"Pronunciation analysis failed: {str(e)}")
             return 5.0  # Neutral score on error
-        
+    
+    def _get_attire_feedback(self, score: float) -> str:
+        """Generate feedback based on attire score"""
+        if score >= 8.5:
+            return "Excellent professional appearance"
+        elif score >= 7:
+            return "Appropriate professional attire"
+        elif score >= 5:
+            return "Could improve professional appearance"
+        else:
+            return "Inappropriate attire for professional interview"
+
+    def _extract_key_frames(self, video_path: str, num_frames: int = 5) -> List[np.ndarray]:
+        """Extract evenly spaced frames from video focusing on upper body"""
+        try:
+            cap = cv2.VideoCapture(video_path)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            frames = []
+            
+            # Get evenly spaced frame indices
+            frame_indices = [int(i * total_frames / num_frames) for i in range(num_frames)]
+            
+            for idx in frame_indices:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+                ret, frame = cap.read()
+                if ret:
+                    # Convert to RGB and crop to upper body (assuming person is centered)
+                    frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                    height, width = frame.shape[:2]
+                    upper_body = frame[:int(height*0.7), :]  # Take top 70% of image
+                    frames.append(upper_body)
+                    
+            cap.release()
+            return frames
+            
+        except Exception as e:
+            print(f"Frame extraction failed: {str(e)}")
+            return []
+    
+    def analyze_attire(self, video_path: str) -> float:
+        """Analyze attire formality using CLIP"""
+        if CLIP_MODEL is None:
+            return 1.0  # Neutral score if model failed to load
+            
+        try:
+            frames = self._extract_key_frames(video_path, num_frames=3)
+            if not frames:
+                return 5.0
+                
+            # Prepare text inputs
+            text_inputs = torch.cat([clip.tokenize(c) for c in self.attire_classes]).to(DEVICE)
+            print ("text inputs",text_inputs)
+            
+            print("\nAttire classes being evaluated:")
+            for i, class_desc in enumerate(self.attire_classes):
+                print(f"{i}: {class_desc}")
+                
+            scores = []
+            for frame_idx, frame in enumerate(frames):
+                print(f"\nAnalyzing frame {frame_idx + 1}:")
+                # Preprocess image
+                img = Image.fromarray(frame)
+                image_input = CLIP_PREPROCESS(img).unsqueeze(0).to(DEVICE)
+                
+                # Calculate features
+                with torch.no_grad():
+                    image_features = CLIP_MODEL.encode_image(image_input)
+                    text_features = CLIP_MODEL.encode_text(text_inputs)
+                
+                # Get similarity scores
+                logits_per_image = (100.0 * image_features @ text_features.T).softmax(dim=-1)
+                probs = logits_per_image.cpu().numpy()[0]
+                 # Apply smoothing to prevent extreme probabilities
+                probs = np.clip(probs, 0.05, 0.95)
+                probs = probs / probs.sum()
+                print ("probs",probs)
+                print("logits_per_image",logits_per_image)
+                print("Class probabilities:")
+                for i, prob in enumerate(probs):
+                   print(f"- {self.attire_classes[i]}: {prob:.2%}")
+            
+                # Calculate weighted score
+                frame_score = sum(
+                    self.attire_class_weights[i] * probs[i] 
+                    for i in range(len(self.attire_classes)))
+                scores.append(frame_score) 
+                print
+            # Average scores across frames and clamp to 0-10 range
+            avg_score = np.mean(scores)
+            final_score = min(max(avg_score, 0), 10)
+            print(f"\nFinal attire score: {final_score:.2f}")
+            return final_score
+            
+        except Exception as e:
+            print(f"CLIP attire analysis failed: {str(e)}")
+            return 1.0
+
+
+
+
+
+
+
+
+def delete_file(path: str):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except Exception as e:
+        print(f"Failed to delete temp file {path}: {e}")
+
+
+@app.post("/analyze-interview/")
+async def analyze_interview_endpoint(request: InterviewRequest, background_tasks: BackgroundTasks):
+    print("hello")
+    try:
+        # Download video
+        video_path = download_video_from_url(request.video_url)
+        print ("video path",video_path)
+        print ("hello after download video")
+        # Step 2: Schedule deletion in background
+        background_tasks.add_task(delete_file, video_path)
+
+        # Step 3: Run analyzer
+        analyzer = InterviewAnalyzer()
+        print ("hello after analyzer")
+        # Analyze interview
+        results = await analyzer.analyze_interview(
+            video_path=video_path,
+            question=request.question,
+            job_description=request.job_description
+        )
+        # results = await analyzer.analyze_interview(
+        #     video_path=video_path,
+        #     question=request.question,
+        #     job_description=request.job_description
+        # )
+        print ("hello after analyze interview")
+        print ("intervew results",results)
+
+        return results
+        #return {"message": "Analysis complete. Report will be sent via email."}
+
+    except Exception as e:
+        print(f"Analysis failed: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))  
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+    
+           
     # def analyze_attire(self, video_path: str) -> float:
     #     try:
             
@@ -1241,48 +1449,13 @@ class InterviewAnalyzer:
     #     # print("detected_classes",detected_classes)
     #     return detected_classes
     #     # return ['suit', 'tie']  # Example detected classes
-def delete_file(path: str):
-    try:
-        if os.path.exists(path):
-            os.remove(path)
-    except Exception as e:
-        print(f"Failed to delete temp file {path}: {e}")
 
-
-@app.post("/analyze-interview/")
-async def analyze_interview_endpoint(request: InterviewRequest, background_tasks: BackgroundTasks):
-    print("hello")
-    try:
-        # Download video
-        video_path = download_video_from_url(request.video_url)
-        print ("video path",video_path)
-        print ("hello after download video")
-        # Step 2: Schedule deletion in background
-        background_tasks.add_task(delete_file, video_path)
-
-        # Step 3: Run analyzer
-        analyzer = InterviewAnalyzer()
-        print ("hello after analyzer")
-        # Analyze interview
-        results = await analyzer.analyze_interview(
-            video_path=video_path,
-            question=request.question,
-            job_description=request.job_description
-        )
-        # results = await analyzer.analyze_interview(
-        #     video_path=video_path,
-        #     question=request.question,
-        #     job_description=request.job_description
-        # )
-        print ("hello after analyze interview")
-        print ("intervew results",results)
-
-        return results
-        #return {"message": "Analysis complete. Report will be sent via email."}
-
-    except Exception as e:
-        print(f"Analysis failed: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))  
+    
+    
+    
+    
+    
+    
     
     
     
