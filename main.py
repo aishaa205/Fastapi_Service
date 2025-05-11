@@ -352,7 +352,7 @@ class Job(BaseModel):
 def recommend_emails(job):
     try:
         job["combined_embedding"] = get_embedding(job["description"] + " " + " ".join(job["title"]))
-        print(job)
+        # print(job)
         inserted_job = jobs_collection.insert_one(job)
         results = list(users_collection.aggregate([
             {
@@ -867,8 +867,8 @@ async def top_talents(job_id: int, page: int = 1, page_size: int = 5, seniority:
 
 class InterviewRequest(BaseModel):
     video_url: str
-    question: str
-    job_description: str
+    job_id: int
+    application_id: int
     # applicant_email: str
     
 class AnswerAnalysisResult(TypedDict):
@@ -895,13 +895,13 @@ class InterviewAnalyzer:
         }
 
     
-    def compute_similarity(self, text1, text2):
+    def compute_similarity(self, text1, embedding2):
         embedding1 = model.encode(text1, convert_to_tensor=True)
-        embedding2 = model.encode(text2, convert_to_tensor=True)
+        # embedding2 = model.encode(text2, convert_to_tensor=True)
         return util.cos_sim(embedding1, embedding2).item()  # float value between -1 and 1
 
 
-    async def analyze_interview(self, video_path: str, question: str, job_description: str):
+    async def analyze_interview(self, video_path: str, job_id: int, application_id: int):
         print ("hello from analyze interview")
         try:
             print ("video_path",video_path)
@@ -913,10 +913,14 @@ class InterviewAnalyzer:
             if not cap.isOpened():
                 raise ValueError("Unable to open video file")
             cap.release()
-
+            job = jobs_collection.find_one({"id": job_id})
+            job_embedding = job['combined_embedding']
+            if(not job_embedding):
+                job_embedding = get_embedding(job["description"] + " " + " ".join(job["title"]))
+                jobs_collection.update_one({"id": job_id}, {"$set": {"combined_embedding": job_embedding}})
             # Perform analyses
             transcript = self.transcribe_video(video_path)
-            answer_analysis = self.analyze_answer(str(transcript), str(job_description))
+            answer_analysis = self.analyze_answer(str(transcript), job_embedding)
             pronunciation_score = self.analyze_pronunciation(video_path)
             grammar_score = self.analyze_grammar(transcript)
             attire_score = self.analyze_attire(video_path)
@@ -943,10 +947,20 @@ class InterviewAnalyzer:
             #     "total_score": round(total_score, 2),
             #     "transcript": transcript
             # }
+            application_table = await get_user_table("applications_application")
+            result = round(total_score * 100, 2)
+            query = (
+                update(application_table)
+                .where(application_table.c.id == application_id)
+                .values(screening_res=result)
+                .execution_options(synchronize_session="fetch")
+            )
+            await db.execute(query)
+            await db.commit()
             return {
-                "question": question,
+                # "question": question,
                 "user_answer": transcript,
-                "ideal_answer": answer_analysis.get('ideal_answer',''),
+                # "ideal_answer": answer_analysis.get('ideal_answer',''),
                 "answer_score": round(answer_analysis['score'], 2),
                 "pronunciation_score": round(pronunciation_score, 2),
                 "grammar_score": round(grammar_score, 2),
@@ -970,10 +984,10 @@ class InterviewAnalyzer:
         except Exception as e:
             raise ValueError(f"Transcription failed: {str(e)}")
     
-    def analyze_answer(self,transcript: str, job_description: str) -> dict:
+    def analyze_answer(self,transcript: str, job_embedding: list) -> dict:
         try:
             # Calculate similarity between answer and job description
-            similarity_score = self.compute_similarity(transcript, job_description)
+            similarity_score = self.compute_similarity(transcript, job_embedding)
             
             # Normalize similarity score to 0-10 scale (cosine similarity is -1 to 1, but typically 0-1 for text)
             normalized_score = max(0, min(10, (similarity_score + 1) * 5))  # maps [-1,1] to [0,10]
@@ -1216,8 +1230,8 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
         # Analyze interview
         results = await analyzer.analyze_interview(
             video_path=video_path,
-            question=request.question,
-            job_description=request.job_description
+            job_id=request.job_id,
+            application_id=request.application_id
         )
         # results = await analyzer.analyze_interview(
         #     video_path=video_path,
