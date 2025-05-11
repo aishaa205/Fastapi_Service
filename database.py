@@ -13,6 +13,7 @@ jobs_collection = db["jobs"]
 users_collection=db["user_cv_db"]
 rag_collection=db["Rag"]
 rag_names_collection = db["rag_names"]
+test_collection=db["cv_test"]
 
 
 ############Postgres#############
