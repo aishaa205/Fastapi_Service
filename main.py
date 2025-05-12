@@ -870,6 +870,7 @@ class InterviewRequest(BaseModel):
     job_id: int
     application_id: int
     # applicant_email: str
+    question_id: int
     
 class AnswerAnalysisResult(TypedDict):
     ideal_answer: str
@@ -901,7 +902,14 @@ class InterviewAnalyzer:
         return util.cos_sim(embedding1, embedding2).item()  # float value between -1 and 1
 
 
-    async def analyze_interview(self, video_path: str, job_id: int, application_id: int):
+    async def analyze_interview(
+            self,
+            video_path: str,
+            job_id: int,
+            application_id: int,
+            question_id: int,
+            db: AsyncSession  # just a plain parameter now
+        ):
         print ("hello from analyze interview")
         try:
             print ("video_path",video_path)
@@ -1214,7 +1222,7 @@ def delete_file(path: str):
 
 
 @app.post("/analyze-interview/")
-async def analyze_interview_endpoint(request: InterviewRequest, background_tasks: BackgroundTasks):
+async def analyze_interview_endpoint(request: InterviewRequest, background_tasks: BackgroundTasks,db: AsyncSession = Depends(lambda: async_session())):
     print("hello")
     try:
         # Download video
@@ -1231,7 +1239,9 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
         results = await analyzer.analyze_interview(
             video_path=video_path,
             job_id=request.job_id,
-            application_id=request.application_id
+            application_id=request.application_id,
+            question_id=request.question_id,
+            db=db,
         )
         # results = await analyzer.analyze_interview(
         #     video_path=video_path,
