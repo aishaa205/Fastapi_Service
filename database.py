@@ -35,20 +35,6 @@ tables = ['answers_answer', 'applications_application', 'jobs_job', 'questions_q
 async def get_user_table(table_name):
     if table_name not in tables:
         raise ValueError(f"Invalid table name: {table_name}")
-    async with engine.begin() as conn:
+    async with engine.connect() as conn:
         await conn.run_sync(metadata.reflect)
     return Table(table_name, metadata, autoload_with=engine)
-
-
-# @app.patch("/users/{user_id}")
-# async def patch_user(user_id: int, new_name: str, db: AsyncSession = Depends(lambda: async_session())):
-#     user_table = await get_user_table("user_user")
-#     stmt = (
-#         update(user_table)
-#         .where(user_table.c.id == user_id)
-#         .values(name=new_name)
-#         .execution_options(synchronize_session="fetch")
-#     )
-#     await db.execute(stmt)
-#     await db.commit()
-#     return {"status": "updated"}

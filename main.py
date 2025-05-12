@@ -869,6 +869,7 @@ class InterviewRequest(BaseModel):
     video_url: str
     job_id: int
     application_id: int
+    question_id: int
     # applicant_email: str
     
 class AnswerAnalysisResult(TypedDict):
@@ -901,7 +902,7 @@ class InterviewAnalyzer:
         return util.cos_sim(embedding1, embedding2).item()  # float value between -1 and 1
 
 
-    async def analyze_interview(self, video_path: str, job_id: int, application_id: int):
+    async def analyze_interview(self, video_path: str, job_id: int, application_id: int, question_id: int):
         print ("hello from analyze interview")
         try:
             print ("video_path",video_path)
@@ -948,6 +949,7 @@ class InterviewAnalyzer:
             #     "transcript": transcript
             # }
             application_table = await get_user_table("applications_application")
+            # answer_table = await get_user_table("answers_answer")
             result = round(total_score * 100, 2)
             query = (
                 update(application_table)
@@ -955,6 +957,8 @@ class InterviewAnalyzer:
                 .values(screening_res=result)
                 .execution_options(synchronize_session="fetch")
             )
+            # answer = answer_table(answer_text=result, application=application_id, question=question_id)
+            # await db.execute(create(answer))
             await db.execute(query)
             await db.commit()
             return {
@@ -1231,7 +1235,8 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
         results = await analyzer.analyze_interview(
             video_path=video_path,
             job_id=request.job_id,
-            application_id=request.application_id
+            application_id=request.application_id,
+            question_id=request.question_id
         )
         # results = await analyzer.analyze_interview(
         #     video_path=video_path,
