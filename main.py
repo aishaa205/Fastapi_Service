@@ -869,6 +869,7 @@ class InterviewRequest(BaseModel):
     video_url: str
     job_id: int
     application_id: int
+    question_id: int
     # applicant_email: str
     question_id: int
     
@@ -956,6 +957,7 @@ class InterviewAnalyzer:
             #     "transcript": transcript
             # }
             application_table = await get_user_table("applications_application")
+            # answer_table = await get_user_table("answers_answer")
             result = round(total_score * 100, 2)
             query = (
                 update(application_table)
@@ -963,6 +965,8 @@ class InterviewAnalyzer:
                 .values(screening_res=result)
                 .execution_options(synchronize_session="fetch")
             )
+            # answer = answer_table(answer_text=result, application=application_id, question=question_id)
+            # await db.execute(create(answer))
             await db.execute(query)
             await db.commit()
             return {
