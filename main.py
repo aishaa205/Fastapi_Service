@@ -99,6 +99,7 @@ def extract_text_from_pdf_cloud(public_id: str):
         doc = fitz.open(stream=pdf_stream, filetype="pdf")
         
         text = "\n".join([page.get_text("text") for page in doc])
+        # print ("text",text)
         doc.close()
 
         return text.strip() if text else "No text found in PDF."
@@ -121,7 +122,7 @@ def format_cv_url(cv_url):
 
 
 @app.get("/recom/")
-async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: int = 5):
+async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: int = 10):
     try:
         print("user_id",user_id)
         cv_url = format_cv_url(cv_url)
@@ -131,7 +132,8 @@ async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: in
             raise HTTPException(status_code=400, detail="Page number must be 1 or higher")
 
         user_data = users_collection.find_one({"user_id": user_id})
-        page_count= jobs_collection.count_documents({}) // page_size + 1
+        page_count = jobs_collection.count_documents({"status": "1"})
+        # page_count= jobs_collection.count_documents({})        # page_count = page_size + 1
         print("page_count",page_count)
         if page_count == 0:
             raise HTTPException(status_code=404, detail="No jobs found")
@@ -151,6 +153,7 @@ async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: in
             else:
                 print("CV updated, generating new embedding")
                 extracted_text = extract_text_from_pdf_cloud(cv_url)
+                # print ("extracted_text",extracted_text)
                 query_vector = get_embedding(extracted_text)
                 users_collection.update_one(
                     {"user_id": user_id},
@@ -174,12 +177,19 @@ async def recommend_jobs(user_id: int, cv_url: str, page: int = 1, page_size: in
                     "limit": 100,
                     "metric": "cosine"
                 }
+                
+            },
+            {
+                "$match": {
+                    "status": "1",
+                }
             },
             {
                 "$project": {
                     "_id": 0,
                     "id": 1,
                     "title": 1,
+                    "company_logo": 1,
                     "description": 1,
                     "score": {"$meta": "vectorSearchScore"}
                 }
@@ -247,6 +257,7 @@ class Job(BaseModel):
 def recommend_emails(job):
     try:
         results = list(users_collection.aggregate([
+            {"$match": {"cv_url": {"$exists": True}}},
             {
                 "$vectorSearch": {
                     "index": "default",
@@ -308,7 +319,7 @@ async def update_job(job_id: int, job: Job):
             result = jobs_collection.insert_one(updated_job)
             return {"message": "Job created successfully", "id": str(result.inserted_id)}
     result = jobs_collection.update_one({"id": job_id}, {"$set": updated_job})
-    print (result)
+    # print (result)
     if result.matched_count == 0:
         raise HTTPException(status_code=404, detail="Job not found in mongodb")
 
@@ -351,7 +362,7 @@ def calculate_embedding_similarity(cv_text, job_text):
 
 
 @app.post("/ats/{user_id}/{job_id}/")
-async def ats_system(user_id: int, job_id: int, request: ATSRequest):
+async def ats_system(user_id: int , job_id: int, request: ATSRequest):
     
     print(f"Received request for user_id={user_id}, job_id={job_id}")
 
@@ -630,6 +641,130 @@ async def ask_rag(question: str, chat_history: list[dict[str, str]] = []):
     except Exception as e:
         print(f"An error occurred during RAG query with history: {e}")
         raise HTTPException(status_code=500, detail=f"An internal error occurred: {e}")
+
+################### resume parse #######################
+import json
+from typing import List, Optional
+from pydantic import BaseModel
+
+class EducationItem(BaseModel):
+    degree: str
+    school: str
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+    fieldOfStudy: Optional[str] = None
+
+class ExperienceItem(BaseModel):
+    title: str
+    company: str
+    startDate: Optional[str] = None
+    endDate: Optional[str] = None
+
+class CVData(BaseModel):
+    about: str
+    skills: List[str]
+    education: List[EducationItem]
+    experience: List[ExperienceItem]
+
+
+def get_embedd_cv_extract(cv, user_id,cv_url):
+    print("embedd dats ",cv, user_id,cv_url)
+    embed= get_embedding(cv)
+    users_collection.update_one(
+         {"user_id": user_id},
+         {"$set": {"embedding": embed, "cv_url": cv_url}}  
+    )
+    
+    
+    
+@app.get("/extract-cv-data/")
+async def extract_cv_data(cv_url: str , user_id: int ,background_tasks: BackgroundTasks): # 
+    print ("cv_url",cv_url,"user_id",user_id)
+    try:
+        public_id = cv_url.split("/")[-1].replace(".pdf", "")
+        text = extract_text_from_pdf_cloud(public_id)
+        print("Extracted text:", text)
+        print("public_id:",public_id)
+
+        prompt = f"""
+You are an intelligent CV parser. From the following resume text, return a valid JSON object with the following keys:
+
+1. "Summary": Generate a professional 5–7 midium length sentence summary based on the full CV content. This must be an original synthesis, not copied from the CV. Clearly identify the candidate's job specialization or target role based on their skills and experience (e.g., "Machine Learning Engineer" or "Full-Stack Developer"). Also include a brief summary of the types of projects they have worked on, highlighting key technologies or outcomes.
+2. "About": Extract the **first personal paragraph or section** that appears after the contact information (name, email, phone, location). This is typically an unlabeled personal introduction, profile, or "About Me" paragraph.
+3. "Skills": A list of technical and soft skills.
+4. "Education": A list of objects with: degree, school, startDate, endDate, fieldOfStudy.
+5. "Experience": A list of objects with: title, company, startDate, endDate.
+
+Return only valid JSON, no markdown or explanation.
+
+CV Text:
+{text[:3000]}
+"""
+        print ("before chatgpt api ")  
+        start_time = time.time()
+        openai.api_key = os.getenv('OPEN_AI')
+        response = openai.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.2,
+            max_tokens=1000
+        )
+        duration = round(time.time() - start_time, 2)
+        print(f"✅ OpenAI API call succeeded in {duration} seconds")
+ 
+        result = response.choices[0].message.content.strip()
+        # print("🧠 Raw OpenAI Response:\n", result)
+
+        # Parse JSON from response
+        json_start = result.find('{')
+        json_str = result[json_start:].split("```")[0]
+        parsed = json.loads(json_str)
+        print("🧠 Parsed OpenAI Response:\n", parsed)
+        
+        # Normalize missing fields
+        parsed.setdefault("About", "")
+        parsed.setdefault("Summary", "")
+        parsed.setdefault("Skills", [])
+        parsed.setdefault("Education", [])
+        parsed.setdefault("Experience", [])
+
+        # Normalize skills list
+        parsed["Skills"] = [s.strip() for s in parsed["Skills"] if isinstance(s, str)]
+
+        # Ensure Education and Experience entries have required keys
+        for edu in parsed["Education"]:
+            edu.setdefault("degree", "")
+            edu.setdefault("school", "")
+            edu.setdefault("startDate", "")
+            edu.setdefault("endDate", "")
+            edu.setdefault("fieldOfStudy", "")
+        
+        for exp in parsed["Experience"]:
+            if isinstance(exp, dict):
+                exp.setdefault("title", "")
+                exp.setdefault("company", "")
+                exp.setdefault("startDate", "")
+                exp.setdefault("endDate", "")
+            else:
+                # fallback in case it is just a string
+                parsed["Experience"] = [{
+                    "title": exp,
+                    "company": "",
+                    "startDate": "",
+                    "endDate": ""
+                }]        
+                # } for exp in parsed["Experience"]]
+                break
+        background_tasks.add_task(get_embedd_cv_extract,text,user_id,public_id)
+        return parsed
+
+    except Exception as e:
+        print("❌ GPT API failed:", e)
+        raise HTTPException(status_code=500, detail=f"AI parsing failed: {e}")
+######### summary generation ##############
+
+
+
 
 
 @app.get("/top_talents")
