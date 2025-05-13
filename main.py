@@ -42,8 +42,6 @@ from app.utils import save_temp_file, download_video_from_url
 
 ####################################
 import os
-import tempfile
-import subprocess
 import cv2
 import numpy as np
 import speech_recognition as sr
@@ -871,15 +869,20 @@ class InterviewRequest(BaseModel):
     job_id: int
     application_id: int
     question_id: int
+    question_text: str
     # applicant_email: str
-    question_id: int
+    # question_id: int
     
 class AnswerAnalysisResult(TypedDict):
     ideal_answer: str
     score: float
     feedback: str
+    semantic_score: float
+    gpt_score: float
+    key_points_covered: List[str]
+    key_points_missed: List[str]
 
- 
+
     
 class InterviewAnalyzer:
     def __init__(self):
@@ -910,6 +913,7 @@ class InterviewAnalyzer:
             job_id: int,
             application_id: int,
             question_id: int,
+            question_text: str,    
             db: AsyncSession  # just a plain parameter now
         ):
         print ("hello from analyze interview")
@@ -923,14 +927,16 @@ class InterviewAnalyzer:
             if not cap.isOpened():
                 raise ValueError("Unable to open video file")
             cap.release()
+            
             job = jobs_collection.find_one({"id": job_id})
+            
             job_embedding = job['combined_embedding']
             if(not job_embedding):
                 job_embedding = get_embedding(job["description"] + " " + " ".join(job["title"]))
                 jobs_collection.update_one({"id": job_id}, {"$set": {"combined_embedding": job_embedding}})
             # Perform analyses
             transcript = self.transcribe_video(video_path)
-            answer_analysis = self.analyze_answer(str(transcript), job_embedding)
+            answer_analysis = self.analyze_answer(str(transcript), job_embedding,question_text)
             pronunciation_score = self.analyze_pronunciation(video_path)
             grammar_score = self.analyze_grammar(transcript)
             attire_score = self.analyze_attire(video_path)
@@ -975,13 +981,18 @@ class InterviewAnalyzer:
                 "user_answer": transcript,
                 # "ideal_answer": answer_analysis.get('ideal_answer',''),
                 "answer_score": round(answer_analysis['score'], 2),
+                "answer_score": round(answer_analysis['score'], 2),
+                "semantic_score": round(answer_analysis['semantic_score'], 2),
                 "pronunciation_score": round(pronunciation_score, 2),
                 "grammar_score": round(grammar_score, 2),
                 "attire_score": round(attire_score, 2),
                 "total_score": round(total_score, 2),
                 "transcript": transcript,
                 "feedback": answer_analysis.get('feedback', ''),
-                "attire_feedback": self._get_attire_feedback(attire_score)
+                "attire_feedback": self._get_attire_feedback(attire_score),
+                "key_points_covered": answer_analysis.get('key_points_covered', []),
+                "key_points_missed": answer_analysis.get('key_points_missed', []),
+                "attire_feedback": self._get_attire_feedback(attire_score),
             }
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -996,43 +1007,72 @@ class InterviewAnalyzer:
             return result['text']
         except Exception as e:
             raise ValueError(f"Transcription failed: {str(e)}")
-    
-    def analyze_answer(self,transcript: str, job_embedding: list) -> dict:
+                    
+                    
+    def analyze_answer(self, transcript: str, job_embedding: list, question_text: str) -> AnswerAnalysisResult:
         try:
-            # Calculate similarity between answer and job description
+            # --- 1. Semantic Similarity ---
+            # IS THIS EMBEDDING RIGHT ?
+            
             similarity_score = self.compute_similarity(transcript, job_embedding)
+            normalized_similarity_score = max(0, min(10, (similarity_score + 1) * 5))
+            print("normalized_similarity_score",normalized_similarity_score)
+            # --- 2. GPT Contextual Analysis ---
+            openai.api_key = os.getenv("OPEN_AI")
+            prompt = f"""
+            You are a senior hiring expert. Evaluate the following candidate's answer to the question:
+            Question:{question_text}
+            Candidate Answer:
+            {transcript}
+
+            Provide:
+            1. Score (0-10) for relevance, technical quality, and completeness
+            2. A short paragraph of feedback
+            3. Key points covered (list)
+            4. Key points missed (list)
+
+            Return in JSON:
+            {{
+                "score": float (0-10),
+                "feedback": "...",
+                "key_points_covered": [...],
+                "key_points_missed": [...]
+            }}
+            """
+            print("prompt",prompt)
+            response = openai.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.3,
+                max_tokens=500,
+            )
             
-            # Normalize similarity score to 0-10 scale (cosine similarity is -1 to 1, but typically 0-1 for text)
-            normalized_score = max(0, min(10, (similarity_score + 1) * 5))  # maps [-1,1] to [0,10]
-            
-            # Generate feedback based on similarity
-            if similarity_score < 0.3:
-                feedback = "The answer shows little relevance to the job requirements."
-                score = 3.0
-            elif similarity_score < 0.5:
-                feedback = "The answer has some relevance but could better address the job requirements."
-                score = 5.0
-            elif similarity_score < 0.7:
-                feedback = "The answer is relevant to the job requirements but could be more specific."
-                score = 7.0
-            else:
-                feedback = "The answer demonstrates strong relevance to the job requirements."
-                score = 9.0
-            
+            result = json.loads(response.choices[0].message.content)
+            print("result",result)
+            gpt_score = float(result.get("score", 0))
+            hybrid_score = round((gpt_score * 0.7) + (normalized_similarity_score * 0.3), 2)
+            print ("gptscore",gpt_score)
+            print(" hybrid_score", hybrid_score)
             return {
-                'similarity_score': similarity_score,
-                'score': score,
-                'normalized_score': normalized_score,
-                'feedback': feedback
+                "ideal_answer": "",
+                "score": hybrid_score,
+                "feedback": result.get("feedback", ""),
+                "semantic_score": round(normalized_similarity_score, 2),
+                "gpt_score": round(gpt_score, 2),
+                "key_points_covered": result.get("key_points_covered", []),
+                "key_points_missed": result.get("key_points_missed", []),
             }
-            
+          
         except Exception as e:
-            print(f"Answer analysis error: {str(e)}")
+            print(f"Hybrid answer analysis error: {str(e)}")
             return {
-                'similarity_score': 0.0,
-                'score': 2.0,
-                'normalized_score': 2.0,
-                'feedback': 'Evaluation could not be completed'
+                "ideal_answer": "",
+                "score": 3.0,
+                "feedback": "Evaluation failed.",
+                "semantic_score": 0.0,
+                "gpt_score": 0.0,
+                "key_points_covered": [],
+                "key_points_missed": []
             }
 
 
@@ -1246,6 +1286,7 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
             job_id=request.job_id,
             application_id=request.application_id,
             question_id=request.question_id,
+            question_text=request.question_text,
             db=db,
         )
         # results = await analyzer.analyze_interview(
@@ -1269,7 +1310,44 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
     
     
     
-    
+    # def analyze_answer(self,transcript: str, job_embedding: list) -> dict:
+    #     try:
+    #         # Calculate similarity between answer and job description
+    #         similarity_score = self.compute_similarity(transcript, job_embedding)
+              
+    #         # Normalize similarity score to 0-10 scale (cosine similarity is -1 to 1, but typically 0-1 for text)
+    #         normalized_score = max(0, min(10, (similarity_score + 1) * 5))  # maps [-1,1] to [0,10]
+            
+    #         # Generate feedback based on similarity
+    #         if similarity_score < 0.3:
+    #             feedback = "The answer shows little relevance to the job requirements."
+    #             score = 3.0
+    #         elif similarity_score < 0.5:
+    #             feedback = "The answer has some relevance but could better address the job requirements."
+    #             score = 5.0
+    #         elif similarity_score < 0.7:
+    #             feedback = "The answer is relevant to the job requirements but could be more specific."
+    #             score = 7.0
+    #         else:
+    #             feedback = "The answer demonstrates strong relevance to the job requirements."
+    #             score = 9.0
+            
+    #         return {
+    #             'similarity_score': similarity_score,
+    #             'score': score,
+    #             'normalized_score': normalized_score,
+    #             'feedback': feedback
+    #         }
+            
+    #     except Exception as e:
+    #         print(f"Answer analysis error: {str(e)}")
+    #         return {
+    #             'similarity_score': 0.0,
+    #             'score': 2.0,
+    #             'normalized_score': 2.0,
+    #             'feedback': 'Evaluation could not be completed'
+    #         }   
+        
     
     
     

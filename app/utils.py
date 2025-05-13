@@ -11,7 +11,7 @@ def save_temp_file(file_content: bytes, file_extension: str = '.webm') -> str:
         
         with tempfile.NamedTemporaryFile(delete=False, suffix=file_extension, dir=temp_dir) as temp_file:
             temp_file.write(file_content)
-            print("temp file",temp_file)
+            print("temp",temp_file)
             return temp_file.name
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"File save failed: {str(e)}")
