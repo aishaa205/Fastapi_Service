@@ -44,36 +44,39 @@ from app.utils import save_temp_file, download_video_from_url
 import os
 import cv2
 import numpy as np
-import speech_recognition as sr
-from deepface import DeepFace
+# import speech_recognition as sr
+# from deepface import DeepFace
 from sentence_transformers import SentenceTransformer, util
 import torch
-from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input, decode_predictions
-from tensorflow.keras.preprocessing import image
-from PIL import Image
+# from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input, decode_predictions
+# from tensorflow.keras.preprocessing import image
+# from PIL import Image
 from fastapi import FastAPI, APIRouter, File, UploadFile, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from typing import Annotated ,List,Optional
 import logging
 import traceback
-from pydub import AudioSegment
-from pydub.silence import detect_silence
-from pydub import AudioSegment
-from pydub.silence import detect_nonsilent
-import noisereduce as nr
-import httpx
-from reportlab.lib.pagesizes import letter
+# from pydub import AudioSegment
+# from pydub.silence import detect_silence
+# from pydub import AudioSegment
+# from pydub.silence import detect_nonsilent
+# import noisereduce as nr
+# import httpx
+# from reportlab.lib.pagesizes import letter
 import whisper
-import ffmpeg
-import cv2
+# import ffmpeg
+# import cv2
 import mediapipe as mp
-from collections import Counter
+# from collections import Counter
 import re
 from typing import Dict,TypedDict
 from pydantic import BaseModel
-from torchvision import transforms
+# from torchvision import transforms
 import base64
 import clip
+from queue_consumer import consume_queue
+from queue_producer import send_to_queue
+import asyncio
 
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -144,6 +147,8 @@ security = HTTPBearer()
 #     logger.info("ML Model Loaded Successfully!")
 #     load_dotenv()
 
+consumer_tasks = []
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup logic
@@ -154,9 +159,18 @@ async def lifespan(app: FastAPI):
     # Load ATS model
     # ats_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     logger.info("ATS model loaded.")
+    for q in ("job_queue", "user_queue", "application_queue"):
+        task = asyncio.create_task(consume_queue(q))
+        consumer_tasks.append(task)
+        logger.info(f"Started listening on {q}")
     yield
-    # Shutdown logic (if any)
+    # Shutdown logic
     logger.info("Shutting down FastAPI application.")
+    logger.info("Shutting down consumers...")
+    for task in consumer_tasks:
+        task.cancel()
+    await asyncio.gather(*consumer_tasks, return_exceptions=True)
+    logger.info("All consumers shut down.")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -201,14 +215,15 @@ def format_cv_url(cv_url):
 def update_user(embedding, user_id, cv_url):
     users_collection.update_one(
                     {"user_id": user_id},
-                    {"$set": {"embedding": embedding, "cv_url": cv_url}},
+                    {"$set": {"embedding": embedding, "cv_url": format_cv_url(cv_url)}},
                     upsert=True
                 )
 def check_user_cv(user_id, cv_url):
     user_data = users_collection.find_one({"user_id": user_id})
     if not user_data:
         embedding = get_embedding(extracted_text)
-        background_tasks.add_task(update_user, embedding, user_id, cv_url)
+        # background_tasks.add_task(update_user, embedding, user_id, cv_url)
+        update_user(embedding, user_id, cv_url)
         return embedding
     if user_data and user_data.get("cv_url") == cv_url:
         print("Using stored embedding (CV unchanged)")
@@ -218,7 +233,8 @@ def check_user_cv(user_id, cv_url):
         extracted_text = extract_text_from_pdf_cloud(format_cv_url(cv_url))
         print(f"Extracted text length: {len(extracted_text)}")
         embedding = get_embedding(extracted_text)
-        background_tasks.add_task(update_user, embedding, user_id, cv_url)
+        # background_tasks.add_task(update_user, embedding, user_id, cv_url)
+        update_user(embedding, user_id, cv_url)
         return embedding
 
 @app.get('/user_embedding/')
@@ -441,7 +457,10 @@ class ATSRequest(BaseModel):
 #     text = re.sub(r'\W+', ' ', text)  # Remove special characters
 #     text = re.sub(r'\s+', ' ', text).strip()  # Remove extra spaces
 #     return text.lower()
-
+def preprocess_rag_text(text):
+    text = text.replace('\n', ' ').strip()
+    text = re.sub(r'\s+', ' ', text)
+    return text.lower()
 
 def calculate_embedding_similarity(cv_embedding, job_embedding):
     similarity_score = util.pytorch_cos_sim(cv_embedding, job_embedding).item()
@@ -528,11 +547,11 @@ def process_pdf_and_get_chunks(file_path: str, pdf: str):
 
         if not text:
             raise HTTPException(status_code=400, detail="No text found in PDF.")
-        
+        text = preprocess_rag_text(text)
         # Split the text into chunks
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=150,
+            chunk_size=500,
+            chunk_overlap=50,
             length_function=len,
         )
         chunked_text = text_splitter.split_text(text)
@@ -976,8 +995,9 @@ class InterviewAnalyzer:
             # await db.execute(create(answer))
             await db.execute(query)
             await db.commit()
-            return {
-                # "question": question,
+            question_text = f'Screening question for {job["title"]} job at {job["company_name"]}'
+            res = {
+                "question": question_text,
                 "user_answer": transcript,
                 # "ideal_answer": answer_analysis.get('ideal_answer',''),
                 "answer_score": round(answer_analysis['score'], 2),
@@ -987,13 +1007,15 @@ class InterviewAnalyzer:
                 "grammar_score": round(grammar_score, 2),
                 "attire_score": round(attire_score, 2),
                 "total_score": round(total_score, 2),
-                "transcript": transcript,
+                # "transcript": transcript,
                 "feedback": answer_analysis.get('feedback', ''),
                 "attire_feedback": self._get_attire_feedback(attire_score),
                 "key_points_covered": answer_analysis.get('key_points_covered', []),
                 "key_points_missed": answer_analysis.get('key_points_missed', []),
                 "attire_feedback": self._get_attire_feedback(attire_score),
             }
+            send_to_queue('email_queue', 'post', 'send-report', res)
+            return res
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
