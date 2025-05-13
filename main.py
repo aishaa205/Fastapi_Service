@@ -706,6 +706,7 @@ def get_embedd_cv_extract(cv, user_id,cv_url):
 @app.get("/extract-cv-data/")
 async def extract_cv_data(cv_url: str , user_id: int ,background_tasks: BackgroundTasks, update: bool = True ):
     try:
+        parsed = {}
         public_id = format_cv_url(cv_url)
         text = extract_text_from_pdf_cloud(public_id)
 
@@ -958,7 +959,7 @@ class InterviewAnalyzer:
             # }
             application_table = await get_user_table("applications_application")
             # answer_table = await get_user_table("answers_answer")
-            result = round(total_score * 100, 2)
+            result = round(total_score * 10, 2)
             query = (
                 update(application_table)
                 .where(application_table.c.id == application_id)
