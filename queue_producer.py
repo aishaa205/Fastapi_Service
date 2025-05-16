@@ -18,6 +18,7 @@ def send_to_queue(queue_name: str, request_type: str, endpoint: str, body: dict 
     :param endpoint: ats/, jobs/, analysis/
     """
     try:
+        print(f"[RabbitMQ] Sending to {queue_name} with body: {body}")
         connection = pika.BlockingConnection(pika.URLParameters(rabbitmq_url))
         channel = connection.channel()
 

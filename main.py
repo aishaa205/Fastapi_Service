@@ -933,7 +933,7 @@ class InterviewAnalyzer:
             application_id: int,
             question_id: int,
             question_text: str,    
-            db: AsyncSession  # just a plain parameter now
+            # db: AsyncSession = Depends(lambda: async_session()),  # just a plain parameter now
         ):
         print ("hello from analyze interview")
         try:
@@ -982,19 +982,12 @@ class InterviewAnalyzer:
             #     "total_score": round(total_score, 2),
             #     "transcript": transcript
             # }
-            application_table = await get_user_table("applications_application")
+            
+            
+            # application_table = await get_user_table("applications_application")
             # answer_table = await get_user_table("answers_answer")
             result = round(total_score * 10, 2)
-            query = (
-                update(application_table)
-                .where(application_table.c.id == application_id)
-                .values(screening_res=result)
-                .execution_options(synchronize_session="fetch")
-            )
-            # answer = answer_table(answer_text=result, application=application_id, question=question_id)
-            # await db.execute(create(answer))
-            await db.execute(query)
-            await db.commit()
+            
             question_text = f'Screening question for {job["title"]} job at {job["company_name"]}'
             res = {
                 "question": question_text,
@@ -1014,7 +1007,25 @@ class InterviewAnalyzer:
                 "key_points_missed": answer_analysis.get('key_points_missed', []),
                 "attire_feedback": self._get_attire_feedback(attire_score),
             }
-            send_to_queue('email_queue', 'post', 'send-report', res)
+            
+            # send_to_queue('email_queue', 'post', 'send-report', res)
+            url = os.getenv("MAIL_SERVICE")+"send-report"
+            print("url*****************************",url)
+            
+            requests.post(url, json=res)
+            
+            print(res)
+            # query = (
+            #     update(application_table)
+            #     .where(application_table.c.id == application_id)
+            #     .values(screening_res=result)
+            #     .execution_options(synchronize_session="fetch")
+            # )
+            # answer = answer_table(answer_text=result, application=application_id, question=question_id)
+            # await db.execute(create(answer))
+            # await db.execute(query)
+            # await db.commit()
+            
             return res
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
@@ -1084,7 +1095,7 @@ class InterviewAnalyzer:
                 "key_points_covered": result.get("key_points_covered", []),
                 "key_points_missed": result.get("key_points_missed", []),
             }
-          
+                     
         except Exception as e:
             print(f"Hybrid answer analysis error: {str(e)}")
             return {
@@ -1289,7 +1300,7 @@ def delete_file(path: str):
 
 
 @app.post("/analyze-interview/")
-async def analyze_interview_endpoint(request: InterviewRequest, background_tasks: BackgroundTasks,db: AsyncSession = Depends(lambda: async_session())):
+async def analyze_interview_endpoint(request: InterviewRequest, background_tasks: BackgroundTasks):#,db: AsyncSession = Depends(lambda: async_session())
     print("hello")
     try:
         # Download video
@@ -1309,7 +1320,7 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
             application_id=request.application_id,
             question_id=request.question_id,
             question_text=request.question_text,
-            db=db,
+            # db=db,
         )
         # results = await analyzer.analyze_interview(
         #     video_path=video_path,
@@ -1318,6 +1329,13 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
         # )
         print ("hello after analyze interview")
         print ("intervew results",results)
+        
+        res = requests.post(os.getenv("MAIL_SERVICE") + "send_report", json=results)
+        if res.status_code != 200:
+            print("Failed to send email report")
+            # raise HTTPException(status_code=500, detail="Failed to send email report")
+        
+        print("Analysis complete. Report will be sent via email.")
 
         return results
         #return {"message": "Analysis complete. Report will be sent via email."}
@@ -1703,11 +1721,11 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
     
    
 @app.post("/register-user/")
-async def register_user( cv: UploadFile = File(...)):
+async def register_user( cvs:  List[UploadFile] = File(...)):
     try:
         # Generate a new user ID (e.g., use a simple auto-increment or UUID)
-        for cv in [cv]:
-            user_id = users_collection.count_documents({}) + 100
+        for cv in cvs:
+            user_id = users_collection.count_documents({}) + 200
             
             # Read and process the CV file
             cv_content = await cv.read()
