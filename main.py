@@ -891,8 +891,7 @@ class InterviewRequest(BaseModel):
     application_id: int
     question_id: int
     question_text: str
-    # applicant_email: str
-    # question_id: int
+    applicant_email: str
     
 class AnswerAnalysisResult(TypedDict):
     ideal_answer: str
@@ -947,7 +946,8 @@ class InterviewAnalyzer:
             job_id: int,
             application_id: int,
             question_id: int,
-            question_text: str,    
+            question_text: str, 
+            applicant_email: str,   
             db: AsyncSession = Depends(lambda: async_session()),  # just a plain parameter now
         ):
         print ("hello from analyze interview")
@@ -1023,6 +1023,8 @@ class InterviewAnalyzer:
                 "key_points_missed": answer_analysis.get('key_points_missed', []),
                 "attire_feedback": self._get_attire_feedback(attire_score),
             }
+            if applicant_email:
+                res["email"] = applicant_email
             
             # send_to_queue('email_queue', 'post', 'send-report', res)
             url = os.getenv("MAIL_SERVICE")+"send-report"
@@ -1051,9 +1053,9 @@ class InterviewAnalyzer:
         try:
             model = whisper.load_model("medium")
             result = model.transcribe(video_path)
-            print ("transcript from  transcribe_video",result['text'])
-            if not result['text']:
-                raise ValueError("Transcription failed")
+            # print ("transcript from  transcribe_video",result['text'])
+            # if not result['text']:
+            #     raise ValueError("Transcription failed")
             return result['text']
         except Exception as e:
             raise ValueError(f"Transcription failed: {str(e)}")
@@ -1066,7 +1068,7 @@ class InterviewAnalyzer:
             
             similarity_score = self.compute_similarity(transcript, job_embedding)
             normalized_similarity_score = max(0, min(10, (similarity_score + 1) * 5))
-            print("normalized_similarity_score",normalized_similarity_score)
+            # print("normalized_similarity_score",normalized_similarity_score)
             # --- 2. GPT Contextual Analysis ---
             openai.api_key = os.getenv("OPEN_AI")
             prompt = f"""
@@ -1089,7 +1091,7 @@ class InterviewAnalyzer:
                 "key_points_missed": [...]
             }}
             """
-            print("prompt",prompt)
+            # print("prompt",prompt)
             response = openai.chat.completions.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role": "user", "content": prompt}],
@@ -1098,11 +1100,11 @@ class InterviewAnalyzer:
             )
             
             result = json.loads(response.choices[0].message.content)
-            print("result",result)
+            # print("result",result)
             gpt_score = float(result.get("score", 0))
             hybrid_score = round((gpt_score * 0.7) + (normalized_similarity_score * 0.3), 2)
-            print ("gptscore",gpt_score)
-            print(" hybrid_score", hybrid_score)
+            # print ("gptscore",gpt_score)
+            # print(" hybrid_score", hybrid_score)
             return {
                 "ideal_answer": "",
                 "score": hybrid_score,
@@ -1141,7 +1143,7 @@ class InterviewAnalyzer:
                 temperature=0
             )
             content = response.choices[0].message.content.strip()
-            print("Grammar score:", content)
+            # print("Grammar score:", content)
             return float(content)
         except Exception as e:
             print(f"Grammar analysis failed: {str(e)}")
@@ -1255,15 +1257,15 @@ class InterviewAnalyzer:
                 
             # Prepare text inputs
             text_inputs = torch.cat([clip.tokenize(c) for c in self.attire_classes]).to(DEVICE)
-            print ("text inputs",text_inputs)
+            # print ("text inputs",text_inputs)
             
-            print("\nAttire classes being evaluated:")
-            for i, class_desc in enumerate(self.attire_classes):
-                print(f"{i}: {class_desc}")
+            # print("\nAttire classes being evaluated:")
+            # for i, class_desc in enumerate(self.attire_classes):
+            #     print(f"{i}: {class_desc}")
                 
             scores = []
             for frame_idx, frame in enumerate(frames):
-                print(f"\nAnalyzing frame {frame_idx + 1}:")
+                # print(f"\nAnalyzing frame {frame_idx + 1}:")
                 # Preprocess image
                 img = Image.fromarray(frame)
                 image_input = CLIP_PREPROCESS(img).unsqueeze(0).to(DEVICE)
@@ -1279,22 +1281,22 @@ class InterviewAnalyzer:
                  # Apply smoothing to prevent extreme probabilities
                 probs = np.clip(probs, 0.05, 0.95)
                 probs = probs / probs.sum()
-                print ("probs",probs)
-                print("logits_per_image",logits_per_image)
-                print("Class probabilities:")
-                for i, prob in enumerate(probs):
-                   print(f"- {self.attire_classes[i]}: {prob:.2%}")
+                # print ("probs",probs)
+                # print("logits_per_image",logits_per_image)
+                # print("Class probabilities:")
+                # for i, prob in enumerate(probs):
+                #    print(f"- {self.attire_classes[i]}: {prob:.2%}")
             
                 # Calculate weighted score
                 frame_score = sum(
                     self.attire_class_weights[i] * probs[i] 
                     for i in range(len(self.attire_classes)))
                 scores.append(frame_score) 
-                print
+                # print
             # Average scores across frames and clamp to 0-10 range
             avg_score = np.mean(scores)
             final_score = min(max(avg_score, 0), 10)
-            print(f"\nFinal attire score: {final_score:.2f}")
+            # print(f"\nFinal attire score: {final_score:.2f}")
             return final_score
             
         except Exception as e:
@@ -1337,29 +1339,30 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
             application_id=request.application_id,
             question_id=request.question_id,
             question_text=request.question_text,
+            applicant_email=request.applicant_email,
             db=db,
+            
         )
         # results = await analyzer.analyze_interview(
         #     video_path=video_path,
         #     question=request.question,
         #     job_description=request.job_description
         # )
+        
+        results['email'] = request.applicant_email
         print ("hello after analyze interview")
         print ("intervew results",results)
         
-        res = requests.post(os.getenv("MAIL_SERVICE") + "send_report", json=results)
-        if res.status_code != 200:
-            print("Failed to send email report")
-            # raise HTTPException(status_code=500, detail="Failed to send email report")
-        
-        print("Analysis complete. Report will be sent via email.")
-
+     
+        # print("Analysis complete. Report will be sent via email.")
+        delete_file(video_path)  
         return results
         #return {"message": "Analysis complete. Report will be sent via email."}
 
     except Exception as e:
         print(f"Analysis failed: {str(e)}")
         traceback.print_exc()
+        delete_file(video_path)  # Ensure file is deleted even on error
         raise HTTPException(status_code=500, detail=str(e))  
     
     

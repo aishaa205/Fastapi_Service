@@ -27,7 +27,11 @@ import logging
 DATABASE_URL = f"postgresql+asyncpg://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 
 engine = create_async_engine(DATABASE_URL, echo=False, 
-    connect_args={"statement_cache_size": 0},# pool_pre_ping=True
+    connect_args={"statement_cache_size": 0},
+    pool_pre_ping=True,
+    pool_size=5,
+    max_overflow=10,
+    pool_timeout=30,
 )
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
