@@ -77,6 +77,7 @@ import clip
 from queue_consumer import consume_queue
 from queue_producer import send_to_queue
 import asyncio
+import threading
 import traceback
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
@@ -160,15 +161,16 @@ async def lifespan(app: FastAPI):
     # ats_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     logger.info("ATS model loaded.")
     for q in ("job_queue", "user_queue", "application_queue"):
-        task = asyncio.create_task(consume_queue(q))
+        task = threading.Thread(target=lambda: asyncio.run(consume_queue(q)))
         consumer_tasks.append(task)
+        task.start()
         logger.info(f"Started listening on {q}")
     yield
     # Shutdown logic
     logger.info("Shutting down FastAPI application.")
     logger.info("Shutting down consumers...")
     for task in consumer_tasks:
-        task.cancel()
+        task.join()
     await asyncio.gather(*consumer_tasks, return_exceptions=True)
     logger.info("All consumers shut down.")
 
@@ -998,7 +1000,7 @@ class InterviewAnalyzer:
             
             
             application_table = await get_user_table("applications_application")
-            answer_table = await get_user_table("answers_answer")
+            # answer_table = await get_user_table("answers_answer")
             result =float(round(total_score * 10, 2))
             print(f"Updating application_id={application_id} with screening_res={result}")
 

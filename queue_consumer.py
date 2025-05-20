@@ -55,5 +55,7 @@ async def consume_queue(queue_name: str):
                 try:
                     resp = await send_request_to_route(endpoint, request_type, data)
                     # print(f"[{queue_name}] got {resp.status_code}: {await resp.text()}")
+                    await message.ack()
                 except Exception as exc:
+                    await message.reject(requeue=True)
                     print(f"[{queue_name}] http error:", exc)
