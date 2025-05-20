@@ -26,7 +26,7 @@ from datetime import datetime
 import time
 import openai
 from dotenv import load_dotenv
-
+from typing import Any
 from PIL import Image
 from io import BytesIO
 # import face_recognition
@@ -37,7 +37,7 @@ import requests
 # import easyocr
 from contextlib import asynccontextmanager
 from app.utils import save_temp_file, download_video_from_url
-
+from transformers import ViTForImageClassification, ViTImageProcessor
 
 
 ####################################
@@ -77,7 +77,7 @@ import clip
 from queue_consumer import consume_queue
 from queue_producer import send_to_queue
 import asyncio
-
+import traceback
 # Initialize logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -918,6 +918,19 @@ class InterviewAnalyzer:
             2: 4.0,  # Casual
             3: 2.0   # Inappropriate
         }
+        
+        # def _load_attire_model(self):
+        #     """Load pre-trained Vision Transformer model and processor"""
+        # model_name = "google/vit-base-patch16-224"
+        # processor = ViTImageProcessor.from_pretrained(model_name)
+        # model = ViTForImageClassification.from_pretrained(
+        #     model_name,
+        #     num_labels=4,  # For formal, smart casual, casual, inappropriate
+        #     ignore_mismatched_sizes=True  # Allows loading fine-tuned weights
+        # )
+        # model.eval()
+        # device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        # return model.to(device), processor
 
     
     def compute_similarity(self, text1, embedding2):
@@ -933,7 +946,7 @@ class InterviewAnalyzer:
             application_id: int,
             question_id: int,
             question_text: str,    
-            # db: AsyncSession = Depends(lambda: async_session()),  # just a plain parameter now
+            db: AsyncSession = Depends(lambda: async_session()),  # just a plain parameter now
         ):
         print ("hello from analyze interview")
         try:
@@ -984,10 +997,11 @@ class InterviewAnalyzer:
             # }
             
             
-            # application_table = await get_user_table("applications_application")
-            # answer_table = await get_user_table("answers_answer")
-            result = round(total_score * 10, 2)
-            
+            application_table = await get_user_table("applications_application")
+            answer_table = await get_user_table("answers_answer")
+            result =float(round(total_score * 10, 2))
+            print(f"Updating application_id={application_id} with screening_res={result}")
+
             question_text = f'Screening question for {job["title"]} job at {job["company_name"]}'
             res = {
                 "question": question_text,
@@ -1015,16 +1029,17 @@ class InterviewAnalyzer:
             requests.post(url, json=res)
             
             print(res)
-            # query = (
-            #     update(application_table)
-            #     .where(application_table.c.id == application_id)
-            #     .values(screening_res=result)
-            #     .execution_options(synchronize_session="fetch")
-            # )
+            query = (
+                update(application_table)
+                .where(application_table.c.id == application_id)
+                .values(screening_res=result)
+                .execution_options(synchronize_session="fetch")
+            )
+            
             # answer = answer_table(answer_text=result, application=application_id, question=question_id)
             # await db.execute(create(answer))
-            # await db.execute(query)
-            # await db.commit()
+            await db.execute(query)
+            await db.commit()
             
             return res
         except Exception as e:
@@ -1111,7 +1126,7 @@ class InterviewAnalyzer:
 
     def analyze_grammar(self, transcript: str) -> float:
         try:
-            # Use OpenAI API to evaluate grammar
+            
             prompt = f"Evaluate the grammar of the following text and provide ONLY a numerical score between 0 and 10:\n\n{transcript}"
             openai.api_key = os.getenv('OPEN_AI')
             response = openai.chat.completions.create(
@@ -1300,7 +1315,7 @@ def delete_file(path: str):
 
 
 @app.post("/analyze-interview/")
-async def analyze_interview_endpoint(request: InterviewRequest, background_tasks: BackgroundTasks):#,db: AsyncSession = Depends(lambda: async_session())
+async def analyze_interview_endpoint(request: InterviewRequest, background_tasks: BackgroundTasks,db: AsyncSession = Depends(lambda: async_session()))-> Any:  #
     print("hello")
     try:
         # Download video
@@ -1320,7 +1335,7 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
             application_id=request.application_id,
             question_id=request.question_id,
             question_text=request.question_text,
-            # db=db,
+            db=db,
         )
         # results = await analyzer.analyze_interview(
         #     video_path=video_path,
@@ -1342,6 +1357,7 @@ async def analyze_interview_endpoint(request: InterviewRequest, background_tasks
 
     except Exception as e:
         print(f"Analysis failed: {str(e)}")
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))  
     
     

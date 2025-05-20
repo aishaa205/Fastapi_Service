@@ -22,11 +22,12 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy import MetaData, Table, update
 import asyncio
 from sqlalchemy.exc import DBAPIError
+import logging
 
 DATABASE_URL = f"postgresql+asyncpg://{os.getenv('DB_USER')}:{os.getenv('DB_PASSWORD')}@{os.getenv('DB_HOST')}:{os.getenv('DB_PORT')}/{os.getenv('DB_NAME')}"
 
-engine = create_async_engine(DATABASE_URL, echo=True, 
-    connect_args={"statement_cache_size": 0}, pool_pre_ping=True
+engine = create_async_engine(DATABASE_URL, echo=False, 
+    connect_args={"statement_cache_size": 0},# pool_pre_ping=True
 )
 async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
@@ -34,7 +35,7 @@ metadata = MetaData()
 
 # Reflect an existing table
 tables = ['answers_answer', 'applications_application', 'jobs_job', 'questions_question', 'user_user']
-
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
 async def get_user_table(table_name, retries=3):
     if table_name not in tables:
         raise ValueError(f"Invalid table name: {table_name}")
