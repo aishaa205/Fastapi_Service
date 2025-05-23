@@ -161,16 +161,15 @@ async def lifespan(app: FastAPI):
     # ats_model = SentenceTransformer("all-MiniLM-L6-v2", device="cpu")
     logger.info("ATS model loaded.")
     for q in ("job_queue", "user_queue", "application_queue"):
-        task = threading.Thread(target=lambda: asyncio.run(consume_queue(q)))
+        task = asyncio.create_task(consume_queue(q))
         consumer_tasks.append(task)
-        task.start()
         logger.info(f"Started listening on {q}")
     yield
     # Shutdown logic
     logger.info("Shutting down FastAPI application.")
     logger.info("Shutting down consumers...")
     for task in consumer_tasks:
-        task.join()
+        task.cancel()
     await asyncio.gather(*consumer_tasks, return_exceptions=True)
     logger.info("All consumers shut down.")
 
@@ -223,6 +222,7 @@ def update_user(embedding, user_id, cv_url):
 def check_user_cv(user_id, cv_url):
     user_data = users_collection.find_one({"user_id": user_id})
     if not user_data:
+        extracted_text = extract_text_from_pdf_cloud(format_cv_url(cv_url))
         embedding = get_embedding(extracted_text)
         # background_tasks.add_task(update_user, embedding, user_id, cv_url)
         update_user(embedding, user_id, cv_url)
@@ -510,6 +510,7 @@ async def ats_system(user_id: int , job_id: int, request: ATSRequest, db: AsyncS
     )
     await db.execute(query)
     await db.commit()
+    print('Ats success', similarity_score)
     return {"status": "updated"}
     # return {"match_percentage": round(similarity_score * 100, 2), "message": "Higher score means a better match!"}
 

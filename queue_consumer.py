@@ -4,6 +4,7 @@ import json
 import httpx
 from dotenv import load_dotenv
 import os
+import traceback
 
 load_dotenv()
 
@@ -14,7 +15,7 @@ async def send_request_to_route(endpoint: str, request_type: str, data: dict):
     """Send an HTTP request to FastAPI route dynamically."""
     url = f"{FASTAPI_URL}/{endpoint}"
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=60.0) as client:
         try:
             if request_type.lower() == "post":
                 response = await client.post(url, json=data)
@@ -27,6 +28,11 @@ async def send_request_to_route(endpoint: str, request_type: str, data: dict):
             return response
         except httpx.RequestError as e:
             print(f"Error making request to {url}: {e}")
+            # traceback.print_exc()
+            return None
+        except Exception as e:
+            print(f"Error in consuming queue: {repr(e)}")
+            # traceback.print_exc()
             return None
 
 async def consume_queue(queue_name: str):
@@ -55,7 +61,10 @@ async def consume_queue(queue_name: str):
                 try:
                     resp = await send_request_to_route(endpoint, request_type, data)
                     # print(f"[{queue_name}] got {resp.status_code}: {await resp.text()}")
-                    await message.ack()
+                    # await message.ack()
                 except Exception as exc:
-                    await message.reject(requeue=True)
-                    print(f"[{queue_name}] http error:", exc)
+                    print(f"[{queue_name}] Error: {exc}")
+                    try:
+                        await message.reject(requeue=True)
+                    except Exception as e:
+                        print(f"[{queue_name}] Failed to reject message: {e}")
