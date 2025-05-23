@@ -210,7 +210,9 @@ def get_embedding(text):
     
 def format_cv_url(cv_url):
     if cv_url.startswith("http"):
-        return cv_url.split("/")[-1].replace(".pdf", "")
+        cv_url = cv_url.split("/")[-1].replace(".pdf", "")
+    elif cv_url.endswith(".pdf"):
+        cv_url = cv_url.replace(".pdf", "")
     return cv_url
 
 def update_user(embedding, user_id, cv_url):
@@ -516,37 +518,47 @@ async def ats_system(user_id: int , job_id: int, request: ATSRequest, db: AsyncS
 
 
 @app.post("/rag")
-async def rag_system(pdf: UploadFile = File(...)):
+async def rag_system(pdf: UploadFile = None, request: Request = None):
     # Create the temp directory if it doesn't exist
     os.makedirs("./temp", exist_ok=True)
-    rag_names_collection.insert_one({"name": pdf.filename.replace(".pdf", ""), "created_at": datetime.utcnow()})
+    file_path = None
+    extract_text = None
+    request = await request.json()
     try:
-        file_path = f"./temp/{pdf.filename}"
-        with open(file_path, "wb") as f:
-            f.write(pdf.file.read())
+        if not pdf and request.get("url") is not None and request.get("name") is not None:
+            extract_text = extract_text_from_pdf_cloud(format_cv_url(request.get("url")))
+        elif pdf is not None:
+            file_path = f"./temp/{pdf.filename}"
+            with open(file_path, "wb") as f:
+                f.write(pdf.file.read())
+        else:
+            raise HTTPException(status_code=400, detail="No PDF file provided")
         
-        start_time = time.time()
-        chunks = process_pdf_and_get_chunks(file_path, pdf.filename.replace(".pdf", ""))
-        end_time = time.time()
-        time_taken = end_time - start_time
-        time_taken = round(time_taken, 2)
-        print(f"Time taken to process PDF: {time_taken} seconds")
-
+        chunk_size = request.get("chunk_size", 500)
+        chunk_overlap = request.get("chunk_overlap", 50)
+        pdf_name = pdf.filename if pdf else request.get("name")
+        chunks = process_pdf_and_get_chunks(pdf_name = pdf_name, file_path = file_path, extract_text = extract_text )
+        
+        rag_names_collection.insert_one({"name": pdf.filename.replace(".pdf", "") if pdf else request.get("name"), 'url': request.get("url") if request.get("url") is not None else "", "created_at": datetime.utcnow()})
         rag_collection.insert_many(chunks)
-        os.remove(file_path)
-        return {"message": f"PDF uploaded and processed successfully in {time_taken} seconds"}
+        if file_path is not None: 
+            os.remove(file_path)
+        return {"message": f"PDF uploaded and processed successfully"}
     except Exception as e:
         print(f"Error processing PDF: {e}")
         raise HTTPException(status_code=500, detail="PDF processing failed")
 
-def process_pdf_and_get_chunks(file_path: str, pdf: str):
+def process_pdf_and_get_chunks(pdf_name: str, file_path: str = None, chunk_size: int = 500, chunk_overlap: int = 50, extract_text: str = None):
     print(f"Processing PDF with PyPDFLoader: {file_path}")
     try:
         # Load PDF using PyMuPDF
-        pdf_stream = BytesIO(open(file_path, "rb").read())
-        doc = fitz.open(stream=pdf_stream, filetype="pdf")
-        text = "\n".join([page.get_text("text") for page in doc])
-        doc.close()
+        if file_path is not None:
+            pdf_stream = BytesIO(open(file_path, "rb").read())
+            doc = fitz.open(stream=pdf_stream, filetype="pdf")
+            text = "\n".join([page.get_text("text") for page in doc])
+            doc.close()
+        elif extract_text is not None:
+            text = extract_text
 
         if not text:
             raise HTTPException(status_code=400, detail="No text found in PDF.")
@@ -564,7 +576,7 @@ def process_pdf_and_get_chunks(file_path: str, pdf: str):
             chunk_data = {
                 "text": chunk,
                 "embedding": get_embedding(chunk),
-                "metadata": pdf
+                "metadata": pdf_name
             }
             chunks_with_metadata.append(chunk_data)
         
